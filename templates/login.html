@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>YDSF – Login</title>
+  <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body class="page-auth">
+
+  {% include 'components/navbar.html' %}
+
+  <main>
+    <div class="card">
+      <h1 class="card-title">Welcome back</h1>
+      <p class="card-subtitle">Login to your YDSF account</p>
+
+      <div class="form-group">
+        <label for="email">Email</label>
+        <input type="email" id="email" placeholder="example@email.com" autocomplete="email"/>
+      </div>
+
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" placeholder="Enter your password" autocomplete="current-password"/>
+      </div>
+
+      <button class="btn-submit" id="btn-login">Login</button>
+      
+      <p class="card-footer">
+        Don't have an account? <a href="/signup">Sign Up</a>
+      </p>
+    </div>
+  </main>
+
+</body>
+</html>
+<script>
+  document.getElementById('btn-login').addEventListener('click', async () => {
+    const email    = document.getElementById('email').value.trim();
+    const password = document.getElementById('password').value;
+
+    // Validasi frontend
+    if (!email || !password) {
+      return showError('Email dan password wajib diisi');
+    }
+
+    try {
+      const res = await fetch('/api/auth/login', {
+        method      : 'POST',
+        headers     : { 'Content-Type': 'application/json' },
+        credentials : 'include',  // ← penting! agar cookie JWT tersimpan
+        body        : JSON.stringify({ email, password })
+      });
+
+      const data = await res.json();
+
+      if (res.ok) {
+        showSuccess(`Selamat datang, ${data.username}! Mengarahkan...`);
+        setTimeout(() => window.location.href = '/chat', 1500);
+      } else {
+        showError(data.detail || 'Login gagal');
+      }
+
+    } catch (err) {
+      showError('Tidak dapat terhubung ke server');
+    }
+  });
+
+  // ─── Helper UI ────────────────────────────────────────────────────────────
+  function showError(msg) {
+    const el = getOrCreateAlert();
+    el.style.background = '#fdecea';
+    el.style.color      = '#c0392b';
+    el.style.border     = '1px solid #e74c3c';
+    el.textContent      = msg;
+    el.style.display    = 'block';
+  }
+
+  function showSuccess(msg) {
+    const el = getOrCreateAlert();
+    el.style.background = '#eafaf1';
+    el.style.color      = '#1e8449';
+    el.style.border     = '1px solid #27ae60';
+    el.textContent      = msg;
+    el.style.display    = 'block';
+  }
+
+  function getOrCreateAlert() {
+    let el = document.getElementById('alert-msg');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'alert-msg';
+      el.style.cssText = `
+        padding: 10px 14px;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        font-size: 14px;
+        display: none;
+      `;
+      const btn = document.getElementById('btn-login');
+      btn.parentNode.insertBefore(el, btn);
+    }
+    return el;
+  }
+</script>

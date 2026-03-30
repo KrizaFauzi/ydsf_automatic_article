@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>YDSF – Generate Articles</title>
+  <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+
+</head>
+<body class="page-home">
+
+  {% include 'components/navbar.html' %}
+
+  <section class="hero">
+    <div class="hero-left">
+      <h1>Generate Articles Powered by Real-Time Trends</h1>
+      <p>Now you can generate articles by gathering information from social media and the internet, ensuring that your articles contain real, up-to-date data.</p>
+      <a href="/chat" class="btn-cta">Start Generate Articles</a>
+    </div>
+    <div class="hero-right">
+      <div class="globe-wrap">
+        <img src="../static/Asset/Globe.png" alt="Globe"
+             onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"/>
+        <div class="globe-placeholder" style="display:none;">Taruh gambar globe di sini</div>
+      </div>
+    </div>
+  </section>
+
+</body>
+</html>

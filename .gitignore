@@ -1,0 +1,82 @@
+# ===========================
+# Environment & Secrets
+# ===========================
+.env
+.env.*
+!.env.example
+
+# ===========================
+# Python
+# ===========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.spec
+
+# ===========================
+# Virtual Environments
+# ===========================
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# ===========================
+# Database & Vector Store
+# ===========================
+chroma_db/
+*.db
+*.sqlite
+*.sqlite3
+
+# ===========================
+# Data / CSV Files (hasil scraping)
+# ===========================
+*.csv
+data*.csv
+news.csv
+scrape.csv
+social.csv
+
+# ===========================
+# IDE & Editor
+# ===========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===========================
+# OS Files
+# ===========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===========================
+# Logs & Temporary Files
+# ===========================
+*.log
+*.tmp
+*.bak
+logs/
+tmp/
+
+# ===========================
+# Migration (opsional, hapus jika ingin track)
+# ===========================
+# migration/versions/
+
+# ===========================
+# Pyright / Type Checker
+# ===========================
+pyrightconfig.json

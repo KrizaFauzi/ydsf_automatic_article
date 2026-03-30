@@ -1,0 +1,176 @@
+<!-- NAVBAR -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>YDSF – Sign Up</title>
+  <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body class="page-auth">
+
+  {% include 'components/navbar.html' %}
+
+  <main>
+    <div class="card">
+      <h1 class="card-title">Create account</h1>
+      <p class="card-subtitle">Join YDSF and start generating articles</p>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label for="firstname">First Name</label>
+          <input type="text" id="firstname" placeholder="John" autocomplete="given-name"/>
+        </div>
+        <div class="form-group">
+          <label for="lastname">Last Name</label>
+          <input type="text" id="lastname" placeholder="Doe" autocomplete="family-name"/>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="email">Email</label>
+        <input type="email" id="email" placeholder="example@email.com" autocomplete="email"/>
+      </div>
+
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" placeholder="Create a password"
+               autocomplete="new-password" oninput="checkStrength(this.value)"/>
+        <div class="strength-bar">
+          <span id="s1"></span><span id="s2"></span>
+          <span id="s3"></span><span id="s4"></span>
+        </div>
+        <div class="strength-label" id="strength-label"></div>
+      </div>
+
+      <div class="form-group">
+        <label for="confirm">Confirm Password</label>
+        <input type="password" id="confirm" placeholder="Repeat your password" autocomplete="new-password"/>
+      </div>
+
+      <button class="btn-submit" id="btn-register">Create Account</button>
+
+      <p class="card-footer">
+        Already have an account? <a href="login.html">Login</a>
+      </p>
+    </div>
+  </main>
+
+  <script>
+    function checkStrength(val) {
+      const bars = ['s1','s2','s3','s4'].map(id => document.getElementById(id));
+      const label = document.getElementById('strength-label');
+      const colors = ['#e74c3c','#e67e22','#f1c40f','#27ae60'];
+      const labels = ['Weak','Fair','Good','Strong'];
+      let score = 0;
+      if (val.length >= 8)        score++;
+      if (/[A-Z]/.test(val))      score++;
+      if (/[0-9]/.test(val))      score++;
+      if (/[^A-Za-z0-9]/.test(val)) score++;
+      bars.forEach((b, i) => b.style.background = i < score ? colors[score-1] : '#e0e0da');
+      label.textContent  = val.length ? labels[score-1] || '' : '';
+      label.style.color  = score > 0  ? colors[score-1] : '#aab5ae';
+    }
+
+     // ─── Password Strength ────────────────────────────────────────────────────
+  function checkStrength(val) {
+    const bars  = ['s1','s2','s3','s4'].map(id => document.getElementById(id));
+    const label = document.getElementById('strength-label');
+    const colors = ['#e74c3c','#e67e22','#f1c40f','#27ae60'];
+    const labels = ['Weak','Fair','Good','Strong'];
+    let score = 0;
+    if (val.length >= 8)           score++;
+    if (/[A-Z]/.test(val))         score++;
+    if (/[0-9]/.test(val))         score++;
+    if (/[^A-Za-z0-9]/.test(val))  score++;
+    bars.forEach((b, i) => b.style.background = i < score ? colors[score-1] : '#e0e0da');
+    label.textContent = val.length ? labels[score-1] || '' : '';
+    label.style.color = score > 0  ? colors[score-1] : '#aab5ae';
+  }
+
+  // ─── Register ─────────────────────────────────────────────────────────────
+  document.getElementById('btn-register').addEventListener('click', async () => {
+    const firstname = document.getElementById('firstname').value.trim();
+    const lastname  = document.getElementById('lastname').value.trim();
+    const email     = document.getElementById('email').value.trim();
+    const password  = document.getElementById('password').value;
+    const confirm   = document.getElementById('confirm').value;
+
+    // Validasi frontend
+    if (!firstname || !email || !password) {
+      return showError('Nama, email, dan password wajib diisi');
+    }
+    if (password !== confirm) {
+      return showError('Password tidak cocok');
+    }
+    if (password.length < 8) {
+      return showError('Password minimal 8 karakter');
+    }
+
+    const username = `${firstname} ${lastname}`.trim();
+
+    try {
+      const res = await fetch('/api/auth/register', {
+        method  : 'POST',
+        headers : { 'Content-Type': 'application/json' },
+        body    : JSON.stringify({ username, email, password })
+      });
+
+      const data = await res.json();
+
+      if (res.ok) {
+        // Berhasil → redirect ke login
+        showSuccess('Akun berhasil dibuat! Mengarahkan ke halaman login...');
+        setTimeout(() => window.location.href = '/login', 1500);
+      } else {
+        // Gagal → tampilkan pesan error dari API
+        showError(data.detail || 'Registrasi gagal');
+      }
+
+    } catch (err) {
+      showError('Tidak dapat terhubung ke server');
+    }
+  });
+
+  // ─── Helper UI ────────────────────────────────────────────────────────────
+  function showError(msg) {
+    const el = getOrCreateAlert();
+    el.style.background = '#fdecea';
+    el.style.color      = '#c0392b';
+    el.style.border     = '1px solid #e74c3c';
+    el.textContent      = msg;
+    el.style.display    = 'block';
+  }
+
+  function showSuccess(msg) {
+    const el = getOrCreateAlert();
+    el.style.background = '#eafaf1';
+    el.style.color      = '#1e8449';
+    el.style.border     = '1px solid #27ae60';
+    el.textContent      = msg;
+    el.style.display    = 'block';
+  }
+
+  function getOrCreateAlert() {
+    let el = document.getElementById('alert-msg');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'alert-msg';
+      el.style.cssText = `
+        padding: 10px 14px;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        font-size: 14px;
+        display: none;
+      `;
+      // Sisipkan sebelum button
+      const btn = document.getElementById('btn-register');
+      btn.parentNode.insertBefore(el, btn);
+    }
+    return el;
+  }
+  </script>
+
+</body>
+</html>
