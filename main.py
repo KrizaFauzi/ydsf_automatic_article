@@ -15,7 +15,7 @@ Tech Stack:
 - Groq API: LLM provider
 - RapidAPI: Twitter & Google Search APIs
 """
-
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -32,11 +32,22 @@ from core.responses import error_response
 # ─── Logger ─────────────────────────────────────────────────────────────────
 logger = get_logger("main")
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Jalankan saat aplikasi startup dan shutdown"""
+    logger.info("Application starting up...")
+    logger.info("Creating database tables...")
+    # Tables akan di-create when /migrate endpoint is called
+    logger.info("Startup complete")
+    yield
+    logger.info("Application shutting down...")
+
 # ─── Create FastAPI App ──────────────────────────────────────────────────────
 app = FastAPI(
     title="YDSF AI Article Chatbot",
     description="AI-powered Q&A chatbot dengan RAG",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # ─── Static & Templates ──────────────────────────────────────────────────────
@@ -84,23 +95,6 @@ async def general_exception_handler(request: Request, exc: Exception):
     )
     return JSONResponse(status_code=500, content=response[0])
 
-
-# ─── Startup Event ──────────────────────────────────────────────────────────
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Jalankan saat aplikasi startup"""
-    logger.info("Application starting up...")
-    logger.info("Creating database tables...")
-    # Tables akan di-create when /migrate endpoint is called
-    logger.info("Startup complete")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Jalankan saat aplikasi shutdown"""
-    logger.info("Application shutting down...")
 
 
 # ─── Health Check ───────────────────────────────────────────────────────────
@@ -156,7 +150,7 @@ app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 def run_migration():
     """
     Run database migration - create all tables.
-    
+
     Call this endpoint once to initialize database.
     """
     try:
@@ -177,3 +171,51 @@ def run_migration():
             "message": f"Migration gagal: {str(e)}",
             "tables": [],
         }
+
+
+@app.post("/migrate/alter", tags=["Migration"])
+def run_alter_migration():
+    """
+    Tambah kolom baru ke tabel yang sudah ada (ALTER TABLE).
+
+    Aman dijalankan berkali-kali — kolom hanya ditambah jika belum ada.
+    Jalankan ini setelah deploy untuk menambah:
+    - chat_sessions.processing_status
+    - chat_sessions.error_message
+    """
+    from sqlalchemy import text
+
+    alterations = [
+        (
+            "processing_status",
+            "ALTER TABLE chat_sessions ADD COLUMN processing_status VARCHAR(20) NOT NULL DEFAULT 'processing'",
+        ),
+        (
+            "error_message",
+            "ALTER TABLE chat_sessions ADD COLUMN error_message TEXT DEFAULT NULL",
+        ),
+    ]
+
+    results = []
+    with engine.connect() as conn:
+        for col_name, sql in alterations:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+                results.append({"column": col_name, "status": "added"})
+                logger.info(f"Column added: chat_sessions.{col_name}")
+            except Exception as e:
+                err_str = str(e).lower()
+                if "duplicate column" in err_str or "already exists" in err_str or "1060" in err_str:
+                    results.append({"column": col_name, "status": "already_exists"})
+                    logger.info(f"Column already exists (skip): {col_name}")
+                else:
+                    results.append({"column": col_name, "status": "error", "detail": str(e)})
+                    logger.error(f"Failed to add column {col_name}: {e}")
+
+    all_ok = all(r["status"] in ("added", "already_exists") for r in results)
+    return {
+        "status": "success" if all_ok else "partial_error",
+        "message": "ALTER TABLE selesai",
+        "columns": results,
+    }

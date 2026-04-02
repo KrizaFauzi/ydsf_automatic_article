@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from core.logger import logger_crud
 from core.exceptions import NotFoundError, DatabaseError
-from migration.models import ChatSession, ChatMessage
+from migration.models import ChatSession, ChatMessage, ArticleSource
 
 
 # ─── ChatSession CRUD ────────────────────────────────────────────────────────
@@ -139,16 +139,16 @@ def update_chat_session_status(
 ) -> ChatSession:
     """
     Update chat session status (mark as ready setelah crawler selesai).
-    
+
     Args:
         session: Database session
         session_id: Chat session ID
         is_ready: Apakah session sudah siap (crawler selesai)
         summary: Optional summary dari crawled content
-    
+
     Returns:
         Updated ChatSession
-    
+
     Raises:
         NotFoundError: Jika session tidak ditemukan
     """
@@ -172,6 +172,111 @@ def update_chat_session_status(
         logger_crud.error(f"Error updating chat session: {e}", exc_info=True)
         session.rollback()
         raise DatabaseError(f"Gagal update chat session: {str(e)}")
+
+
+def update_session_paths(
+    session: Session,
+    session_id: str,
+    vector_db_path: str,
+    summary: str | None = None,
+) -> ChatSession:
+    """
+    Update vector_db_path setelah crawl selesai di background.
+
+    Args:
+        session: Database session
+        session_id: Chat session ID
+        vector_db_path: Path ChromaDB yang sudah selesai di-build
+        summary: Optional crawl summary
+
+    Returns:
+        Updated ChatSession
+    """
+    try:
+        chat_session = get_chat_session(session, session_id)
+        chat_session.vector_db_path = vector_db_path
+        if summary:
+            chat_session.summary = summary
+        chat_session.updated_at = datetime.now(timezone.utc)
+
+        session.add(chat_session)
+        session.commit()
+        session.refresh(chat_session)
+
+        logger_crud.info(f"Session paths updated: {session_id} → {vector_db_path}")
+        return chat_session
+
+    except NotFoundError:
+        raise
+    except Exception as e:
+        logger_crud.error(f"Error updating session paths: {e}", exc_info=True)
+        session.rollback()
+        raise DatabaseError(f"Gagal update session paths: {str(e)}")
+
+
+def set_session_ready(
+    session: Session,
+    session_id: str,
+) -> ChatSession:
+    """
+    Tandai session sebagai ready (background task selesai sukses).
+    """
+    try:
+        chat_session = get_chat_session(session, session_id)
+        chat_session.is_ready = True
+        chat_session.processing_status = "ready"
+        chat_session.updated_at = datetime.now(timezone.utc)
+
+        session.add(chat_session)
+        session.commit()
+        session.refresh(chat_session)
+
+        logger_crud.info(f"Session marked ready: {session_id}")
+        return chat_session
+
+    except NotFoundError:
+        raise
+    except Exception as e:
+        logger_crud.error(f"Error marking session ready: {e}", exc_info=True)
+        session.rollback()
+        raise DatabaseError(f"Gagal mark session ready: {str(e)}")
+
+
+def set_session_error(
+    session: Session,
+    session_id: str,
+    error_message: str,
+) -> ChatSession:
+    """
+    Simpan error ke session jika background task gagal.
+
+    Args:
+        session: Database session
+        session_id: Chat session ID
+        error_message: Pesan error yang terjadi
+
+    Returns:
+        Updated ChatSession
+    """
+    try:
+        chat_session = get_chat_session(session, session_id)
+        chat_session.processing_status = "error"
+        chat_session.error_message = error_message
+        chat_session.updated_at = datetime.now(timezone.utc)
+
+        session.add(chat_session)
+        session.commit()
+        session.refresh(chat_session)
+
+        logger_crud.info(f"Session error set: {session_id} — {error_message[:80]}")
+        return chat_session
+
+    except NotFoundError:
+        raise
+    except Exception as e:
+        logger_crud.error(f"Error setting session error: {e}", exc_info=True)
+        session.rollback()
+        raise DatabaseError(f"Gagal set session error: {str(e)}")
 
 
 # ─── ChatMessage CRUD ────────────────────────────────────────────────────────
@@ -316,3 +421,130 @@ def get_session_message_count(session: Session, session_id: str) -> int:
     except Exception as e:
         logger_crud.error(f"Error getting message count: {e}", exc_info=True)
         return 0
+
+
+# ─── ArticleSource CRUD ──────────────────────────────────────────────────────
+
+
+def create_article_source(
+    session: Session,
+    session_id: str,
+    judul: str,
+    sumber: str,
+    url: str,
+    order: int = 0,
+) -> ArticleSource:
+    """
+    Create new article source reference.
+    
+    Args:
+        session: Database session
+        session_id: Chat session ID (foreign key)
+        judul: Judul artikel/post dari sumber
+        sumber: Nama sumber (Wikipedia, Twitter, GDELT, NewsAPI, dll)
+        url: URL artikel/post
+        order: Urutan dalam daftar sources (untuk sorting)
+    
+    Returns:
+        ArticleSource yang baru dibuat
+    
+    Raises:
+        DatabaseError: Jika gagal create
+    """
+    try:
+        source = ArticleSource(
+            session_id=session_id,
+            judul=judul,
+            sumber=sumber,
+            url=url,
+            order=order,
+        )
+        session.add(source)
+        session.commit()
+        session.refresh(source)
+
+        logger_crud.debug(f"Article source created: {sumber} ({url[:50]})")
+        return source
+
+    except Exception as e:
+        logger_crud.error(f"Error creating article source: {e}", exc_info=True)
+        session.rollback()
+        raise DatabaseError(f"Gagal create article source: {str(e)}")
+
+
+def create_article_sources_batch(
+    session: Session,
+    session_id: str,
+    sources: list[dict],
+) -> list[ArticleSource]:
+    """
+    Create multiple article sources sekaligus (batch).
+    
+    Args:
+        session: Database session
+        session_id: Chat session ID (foreign key)
+        sources: list[dict] dengan structure:
+                 [{"judul": str, "sumber": str, "url": str}, ...]
+    
+    Returns:
+        List of created ArticleSource objects
+    
+    Raises:
+        DatabaseError: Jika gagal create
+    """
+    if not sources:
+        return []
+    
+    try:
+        created_sources = []
+        for order, src in enumerate(sources):
+            source = ArticleSource(
+                session_id=session_id,
+                judul=src.get("judul", "Untitled"),
+                sumber=src.get("sumber", "Unknown"),
+                url=src.get("url", ""),
+                order=order,
+            )
+            session.add(source)
+            created_sources.append(source)
+        
+        session.commit()
+        for source in created_sources:
+            session.refresh(source)
+
+        logger_crud.info(f"Created {len(created_sources)} article sources for session: {session_id}")
+        return created_sources
+
+    except Exception as e:
+        logger_crud.error(f"Error creating article sources batch: {e}", exc_info=True)
+        session.rollback()
+        raise DatabaseError(f"Gagal create article sources: {str(e)}")
+
+
+def get_article_sources(
+    session: Session,
+    session_id: str,
+) -> list[ArticleSource]:
+    """
+    Get all article sources untuk session, ordered by order.
+    
+    Args:
+        session: Database session
+        session_id: Chat session ID
+    
+    Returns:
+        List of ArticleSource, ordered by order
+    """
+    try:
+        sources = session.exec(
+            select(ArticleSource)
+            .where(ArticleSource.session_id == session_id)
+            .order_by(ArticleSource.order)
+        ).all()
+
+        logger_crud.debug(f"Found {len(sources)} article sources for session: {session_id}")
+        return sources
+
+    except Exception as e:
+        logger_crud.error(f"Error getting article sources: {e}", exc_info=True)
+        raise DatabaseError(f"Gagal get article sources: {str(e)}")

@@ -1,3 +1,10 @@
+"""
+services/reranker.py — Algoritma Hybrid Reranking untuk Retrieval.
+
+Menggabungkan BM25 (Exact Match), Cosine Similarity (Semantic), dan Cross-Encoder
+(Contextual) untuk memilih dokumen paling relevan sebelum diproses oleh LLM.
+"""
+
 import time
 from dataclasses import dataclass, field
 

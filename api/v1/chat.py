@@ -14,7 +14,7 @@ Flow:
                    → Call AI service → Simpan user msg + bot msg ke DB → Return answer
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 from sqlmodel import Session
 import uuid
@@ -42,9 +42,14 @@ from crud.chat import (
     get_chat_session,
     get_user_chat_sessions,
     update_chat_session_status,
+    update_session_paths,
+    set_session_ready,
+    set_session_error,
     create_chat_message,
     get_chat_messages,
     get_session_message_count,
+    create_article_sources_batch,
+    get_article_sources,
 )
 from services.crawler import run_crawler
 from services.ai import ask, generate_article
@@ -141,6 +146,7 @@ class AskResponse(BaseModel):
     retrieved_docs: int = 3
     processing_time_ms: float
 
+
 class GenerateRequest(BaseModel):
     """Schema untuk POST /generate — generate artikel dari topik session"""
 
@@ -156,27 +162,44 @@ class GenerateResponse(BaseModel):
 
     article: str
     session_id: str
+    sources: list[dict] | None = None
     processing_time_ms: float
+
+
+class SessionStatusResponse(BaseModel):
+    """Schema untuk response GET /sessions/{id}/status"""
+
+    session_id: str
+    processing_status: str   # 'processing' | 'ready' | 'error'
+    is_ready: bool
+    has_article: bool
+    error_message: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 # Legacy schemas (untuk /crawl lama)
 class ChatRequest(BaseModel):
+    """Schema untuk POST /crawl legacy (chat)."""
     question: str = Field(..., min_length=1, max_length=5000)
     vector_db_path: str = Field(...)
     history: list = Field(default=[])
 
 
 class ChatResponse(BaseModel):
+    """Schema untuk response dari /crawl legacy (chat)."""
     answer: str
     retrieved_docs: int = 3
     processing_time_ms: float
 
 
 class CrawlRequest(BaseModel):
+    """Schema untuk POST /crawl legacy (inisialisasi)."""
     query: str = Field(..., min_length=1, max_length=500)
 
 
 class CrawlResponse(BaseModel):
+    """Schema untuk response dari /crawl legacy (inisialisasi)."""
     status: str
     query: str
     vector_db_path: str
@@ -185,6 +208,127 @@ class CrawlResponse(BaseModel):
     total_docs: int
     total_chunks: int
     message: str
+
+
+# ─── Background Task ─────────────────────────────────────────────────────────
+
+
+def _background_crawl_and_generate(session_id: str, topic: str) -> None:
+    """
+    Background task: jalankan crawl + generate artikel.
+
+    Dipanggil via FastAPI BackgroundTasks sehingga tidak blocking HTTP.
+    Setiap operasi DB menggunakan session terpisah agar aman dari timeout.
+
+    Flow:
+    1. Crawl semua sumber → build ChromaDB
+    2. Update vector_db_path ke DB
+    3. Generate artikel via RAG
+    4. Simpan artikel sebagai pesan bot
+    5. Mark session sebagai ready
+    """
+    from migration.base import engine
+    from sqlmodel import Session as DBSession
+
+    logger_chat.info(f"[BG] ===== BACKGROUND TASK START: session={session_id} topic='{topic}' =====")
+    t0 = time_module.time()
+
+    def _new_db():
+        """Buat session DB baru (koneksi segar)."""
+        return DBSession(engine)
+
+    try:
+        # ── STEP 1: Crawler ──────────────────────────────────────────
+        logger_chat.info(f"[BG][1/5] CRAWLER START — topic='{topic}'")
+        t1 = time_module.time()
+        crawl_result = run_crawler(query=topic, session_id=session_id)
+        vector_db_path = crawl_result["vector_db_path"]
+        sources = crawl_result.get("sources", {})
+        logger_chat.info(
+            f"[BG][1/5] CRAWLER DONE — {crawl_result['total_docs']} docs, "
+            f"{crawl_result['total_chunks']} chunks, path={vector_db_path} "
+            f"({time_module.time()-t1:.1f}s)"
+        )
+
+        summary = (
+            f"Crawled {crawl_result['total_docs']} docs "
+            f"({sources.get('twitter', 0)} tweets, "
+            f"{sources.get('rss', 0) + sources.get('google_news', 0)} news, "
+            f"{sources.get('wikipedia', 0) + sources.get('wikidata', 0)} knowledge), "
+            f"{crawl_result['total_chunks']} chunks indexed."
+        )
+
+        # ── STEP 2: Simpan ke DB ─────────────────────────────────────
+        logger_chat.info(f"[BG][2/5] SAVING vector_db_path to DB...")
+        with _new_db() as db:
+            update_session_paths(
+                session=db,
+                session_id=session_id,
+                vector_db_path=vector_db_path,
+                summary=summary,
+            )
+        logger_chat.info(f"[BG][2/5] DONE — vector_db_path saved")
+
+        # ── STEP 3: Generate artikel ──────────────────────────────────
+        logger_chat.info(f"[BG][3/5] GENERATE ARTICLE START — topic='{topic}'")
+        t3 = time_module.time()
+        article_result = generate_article(topic=topic, vector_db_path=vector_db_path)
+        article_content = article_result["article"]
+        sources = article_result.get("sources", [])
+        logger_chat.info(
+            f"[BG][3/5] GENERATE ARTICLE DONE — {len(article_content)} chars, {len(sources)} sources "
+            f"({time_module.time()-t3:.1f}s)"
+        )
+
+        # ── STEP 4: Simpan pesan ─────────────────────────────────────
+        logger_chat.info(f"[BG][4/5] SAVING article as chat message...")
+        with _new_db() as db:
+            msg_count = get_session_message_count(db, session_id)
+            create_chat_message(
+                session=db,
+                session_id=session_id,
+                role="bot",
+                content=article_content,
+                order=msg_count,
+            )
+        logger_chat.info(f"[BG][4/5] DONE — message saved")
+
+        # ── STEP 4.5: Simpan sources ke ArticleSource table ──────────
+        logger_chat.info(f"[BG][4.5/5] SAVING {len(sources)} sources...")
+        with _new_db() as db:
+            if sources:
+                create_article_sources_batch(
+                    session=db,
+                    session_id=session_id,
+                    sources=sources,
+                )
+        logger_chat.info(f"[BG][4.5/5] DONE — {len(sources)} sources saved")
+
+        # ── STEP 5: Mark ready ───────────────────────────────────────
+        logger_chat.info(f"[BG][5/5] MARKING SESSION READY...")
+        with _new_db() as db:
+            set_session_ready(session=db, session_id=session_id)
+        logger_chat.info(
+            f"[BG][5/5] DONE ✓ — session {session_id} is READY "
+            f"(total: {time_module.time()-t0:.1f}s)"
+        )
+        logger_chat.info(f"[BG] ===== BACKGROUND TASK COMPLETE =====")
+
+    except Exception as e:
+        logger_chat.error(
+            f"[BG] ===== BACKGROUND TASK FAILED at step — {type(e).__name__}: {e} =====",
+            exc_info=True
+        )
+        try:
+            with _new_db() as db:
+                set_session_error(
+                    session=db,
+                    session_id=session_id,
+                    error_message=f"{type(e).__name__}: {str(e)[:480]}",
+                )
+        except Exception as db_err:
+            logger_chat.error(f"[BG] Cannot set error to DB: {db_err}")
+
 
 
 # ─── Session Endpoints ────────────────────────────────────────────────────────
@@ -213,124 +357,123 @@ def list_sessions(
         raise HTTPException(status_code=500, detail="Gagal mengambil daftar session")
 
 
-@router.post("/sessions", response_model=dict, status_code=201)
+@router.post("/sessions", response_model=dict, status_code=202)
 def create_session(
     payload: CreateSessionRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
     """
-    Buat chat session baru, jalankan crawl, dan auto-generate artikel.
+    Buat chat session baru dan jadwalkan crawl + generate artikel di background.
 
-    Algorithm (ONE-CLICK):
-    1. Generate session_id (UUID)
-    2. Run crawler (Twitter + Google) → build ChromaDB di chroma_db/session_{id}
-    3. Save ChatSession ke DB dengan vector_db_path & is_ready=True
-    4. **Generate artikel otomatis** menggunakan RAG
-    5. Simpan artikel sebagai pesan bot pertama
-    6. Return session + article
+    Endpoint ini langsung return dalam <1 detik dengan status 'processing'.
+    Proses berat (crawl + generate) berjalan di background thread.
 
-    Args:
-        payload: CreateSessionRequest dengan topic & optional title
+    Frontend harus polling GET /sessions/{id}/status sampai is_ready=True.
 
     Returns:
         {
             "session": SessionResponse,
-            "article": "markdown string artikel yang di-generate"
+            "status": "processing"
         }
-
-    Raises:
-        ValidationError: Topic kosong
-        CrawlerError: Crawling gagal
-        AIServiceError: Article generation gagal (tapi session tetap terbuat)
     """
     topic = payload.topic.strip()
     title = payload.title.strip() if payload.title else (
         topic[:80] + "…" if len(topic) > 80 else topic
     )
 
-    logger_chat.info(f"Create session + generate article for user: {current_user.id}, topic: '{topic}'")
+    logger_chat.info(
+        f"Create session for user: {current_user.id}, topic: '{topic}'"
+    )
 
     try:
-        # 1. Generate session_id
-        session_id = str(uuid.uuid4())
-        logger_chat.debug(f"Generated session_id: {session_id}")
-
-        # 2. Run crawler — ini yang paling lama (5-15 detik)
-        logger_chat.info(f"Starting crawl for topic: '{topic}'")
-        crawl_result = run_crawler(query=topic, session_id=session_id)
-        vector_db_path = crawl_result["vector_db_path"]
-        logger_chat.info(f"Crawl done. Docs: {crawl_result['total_docs']}, Chunks: {crawl_result['total_chunks']}")
-
-        # 3. Save session ke DB
+        # 1. Simpan session ke DB (is_ready=False, processing_status='processing')
         chat_session = create_chat_session(
             session=db,
             user_id=current_user.id,
             title=title,
             topic=topic,
-            vector_db_path=vector_db_path,
-        )
-        sources = crawl_result.get("sources", {})
-        
-        summary = (
-            f"Crawled {crawl_result['total_docs']} docs "
-            f"({sources.get('twitter', 0)} tweets, "
-            f"{sources.get('rss', 0) + sources.get('google_news', 0)} news, "
-            f"{sources.get('wikipedia', 0) + sources.get('wikidata', 0)} knowledge), "
-            f"{crawl_result['total_chunks']} chunks indexed."
+            vector_db_path="",  # akan diisi oleh background task
         )
 
-        # Mark as ready
-        chat_session = update_chat_session_status(
-            session=db,
+        # 2. Jadwalkan background task — tidak blocking HTTP
+        background_tasks.add_task(
+            _background_crawl_and_generate,
             session_id=chat_session.id,
-            is_ready=True,
-            summary=summary,
+            topic=topic,
         )
 
-        logger_chat.info(f"Session created: {chat_session.id}. Now generating article...")
+        logger_chat.info(
+            f"Session created: {chat_session.id}. Background task scheduled."
+        )
 
-        # 4. **Generate artikel otomatis**
-        try:
-            article = generate_article(
-                topic=topic,
-                vector_db_path=vector_db_path,
-            )
-            logger_chat.info(f"Article generated ({len(article)} chars) for session {chat_session.id}")
-
-            # 5. Simpan artikel sebagai pesan bot pertama ke DB
-            msg_count = get_session_message_count(db, chat_session.id)
-            create_chat_message(
-                session=db,
-                session_id=chat_session.id,
-                role="bot",
-                content=article,
-                order=msg_count,
-            )
-            logger_chat.info(f"Article saved to DB for session {chat_session.id}")
-
-        except Exception as e:
-            # Jika generate gagal, tapi session sudah terbuat, log error tapi tetap return session
-            logger_chat.error(f"Article generation failed for session {chat_session.id}: {e}")
-            article = ""  # Return empty article, frontend bisa retry dengan /generate
-
-        logger_chat.info(f"Session created and ready: {chat_session.id}")
+        # 3. Langsung return — tidak timeout
         return {
-            "session": chat_session,
-            "article": article,
+            "session": {
+                "id": chat_session.id,
+                "title": chat_session.title,
+                "topic": chat_session.topic,
+                "vector_db_path": chat_session.vector_db_path,
+                "is_ready": chat_session.is_ready,
+                "processing_status": "processing",
+                "created_at": chat_session.created_at.isoformat(),
+            },
+            "status": "processing",
         }
 
-    except ValidationError as e:
-        raise HTTPException(status_code=400, detail=e.message)
-    except CrawlerError as e:
-        logger_chat.error(f"Crawler error: {e.message}")
-        raise HTTPException(status_code=500, detail=e.message)
     except DatabaseError as e:
         logger_chat.error(f"DB error creating session: {e.message}")
         raise HTTPException(status_code=500, detail=e.message)
     except Exception as e:
         logger_chat.error(f"Unexpected error creating session: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Gagal membuat session baru")
+
+@router.get("/sessions/{session_id}/status", response_model=SessionStatusResponse)
+def get_session_status(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """
+    Cek status background task untuk session.
+
+    Frontend polling endpoint ini setiap beberapa detik sampai
+    processing_status == 'ready' atau 'error'.
+
+    Returns:
+        SessionStatusResponse dengan:
+        - processing_status: 'processing' | 'ready' | 'error'
+        - is_ready: bool
+        - has_article: apakah artikel sudah tersimpan di DB
+        - error_message: pesan error jika gagal
+    """
+    try:
+        chat_session = get_chat_session(db, session_id)
+        if chat_session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Akses ditolak")
+
+        # Cek apakah sudah ada artikel tersimpan
+        msg_count = get_session_message_count(db, session_id)
+        has_article = msg_count > 0
+
+        return SessionStatusResponse(
+            session_id=session_id,
+            processing_status=getattr(chat_session, 'processing_status', 
+                'ready' if chat_session.is_ready else 'processing'),
+            is_ready=chat_session.is_ready,
+            has_article=has_article,
+            error_message=getattr(chat_session, 'error_message', None),
+        )
+
+    except HTTPException:
+        raise
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=e.message)
+    except Exception as e:
+        logger_chat.error(f"Error getting session status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Gagal cek status session")
+
 
 
 @router.get("/sessions/{session_id}/messages", response_model=list[MessageResponse])
@@ -370,6 +513,76 @@ def get_messages(
     except Exception as e:
         logger_chat.error(f"Unexpected error getting messages: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Gagal mengambil pesan")
+
+
+# ─── Sources Endpoint ─────────────────────────────────────────────────────────
+
+
+@router.get("/sessions/{session_id}/sources")
+def get_sources(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """
+    Ambil semua article sources (references) untuk session tertentu.
+    
+    Returns sources dalam format yang bisa langsung di-display:
+    - Formatted markdown untuk ditambahkan di bawah artikel
+    - Array of sources untuk rendering yang lebih custom
+
+    Args:
+        session_id: ID ChatSession
+
+    Returns:
+        {
+            "formatted": "## Sumber & Referensi\n\n1. [Title (Source)](URL)\n...",
+            "sources": [
+                {"judul": "...", "sumber": "...", "url": "...", "order": 0},
+                ...
+            ]
+        }
+    """
+    logger_chat.info(f"Get sources for session: {session_id}")
+    try:
+        # Verify session belongs to user
+        chat_session = get_chat_session(db, session_id)
+        if chat_session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Akses ditolak")
+
+        # Get sources from DB
+        sources_objs = get_article_sources(db, session_id=session_id)
+        
+        # Convert to dicts for JSON response
+        sources_data = [
+            {
+                "judul": src.judul,
+                "sumber": src.sumber,
+                "url": src.url,
+                "order": src.order,
+            }
+            for src in sources_objs
+        ]
+
+        # Format as markdown
+        from services.ai import _format_sources_for_display
+        formatted = _format_sources_for_display(sources_data)
+
+        return {
+            "formatted": formatted,
+            "sources": sources_data,
+            "count": len(sources_data),
+        }
+
+    except HTTPException:
+        raise
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=e.message)
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=e.message)
+    except Exception as e:
+        logger_chat.error(f"Unexpected error getting sources: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Gagal mengambil sources")
 
 
 # ─── Ask Endpoint (RAG) ───────────────────────────────────────────────────────
@@ -495,6 +708,9 @@ def generate_article_endpoint(
     """
     Generate artikel multi-seksi (6 poin) dari topik session menggunakan RAG.
 
+    CONSTRAINT: Setiap session hanya boleh punya 1 artikel. 
+    Jika sudah ada artikel di session, return error 409 Conflict.
+
     Tidak membutuhkan input pertanyaan dari user — topik sudah ada di ChatSession.
     Artikel disimpan ke DB sebagai pesan bot dan dikembalikan ke frontend.
 
@@ -502,7 +718,7 @@ def generate_article_endpoint(
         payload: GenerateRequest dengan session_id
 
     Returns:
-        GenerateResponse dengan article (Markdown) + metadata
+        GenerateResponse dengan article (Markdown) + sources + metadata
     """
     logger_chat.info(f"Generate article: session={payload.session_id}")
     start_time = time_module.time()
@@ -516,33 +732,56 @@ def generate_article_endpoint(
         if not chat_session.is_ready:
             raise HTTPException(status_code=400, detail="Session belum siap, crawler masih berjalan")
 
+        # 2. Check: apakah sudah ada artikel di session ini?
+        # Article adalah message dengan role="bot" yang paling awal (order=0)
+        existing_messages = get_chat_messages(db, session_id=payload.session_id, limit=1)
+        if existing_messages:
+            first_msg = existing_messages[0]
+            if first_msg.role == "bot":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Artikel sudah ada. Setiap session hanya bisa punya 1 artikel. Silakan buat session baru jika ingin artikel lain."
+                )
+
         vector_db_path = chat_session.vector_db_path
         topic = chat_session.topic
         logger_chat.debug(f"Generating article for topic: '{topic}', ChromaDB: {vector_db_path}")
 
-        # 2. Dapatkan urutan pesan berikutnya
+        # 3. Dapatkan urutan pesan berikutnya
         msg_count = get_session_message_count(db, payload.session_id)
 
-        # 3. Generate artikel via RAG
-        article = generate_article(
+        # 4. Generate artikel via RAG
+        article_result = generate_article(
             topic=topic,
             vector_db_path=vector_db_path,
         )
+        article_content = article_result["article"]
+        sources = article_result.get("sources", [])
 
         processing_time_ms = (time_module.time() - start_time) * 1000
 
-        # 4. Simpan artikel sebagai pesan bot ke DB
+        # 5. Simpan artikel sebagai pesan bot ke DB
         create_chat_message(
             session=db,
             session_id=payload.session_id,
             role="bot",
-            content=article,
+            content=article_content,
             order=msg_count,
         )
 
+        # 6. Simpan sources ke ArticleSource table
+        if sources:
+            create_article_sources_batch(
+                session=db,
+                session_id=payload.session_id,
+                sources=sources,
+            )
+            logger_chat.info(f"Saved {len(sources)} article sources")
+
         logger_chat.info(f"Article saved. Generated in {processing_time_ms:.2f}ms")
         return GenerateResponse(
-            article=article,
+            article=article_content,
+            sources=sources,
             session_id=payload.session_id,
             processing_time_ms=processing_time_ms,
         )

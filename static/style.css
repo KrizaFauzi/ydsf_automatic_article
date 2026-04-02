@@ -692,3 +692,27 @@ body.page-chat {
   color: #333;
   margin-right: 8px;
 }
+
+.btn-logout {
+  background: #c0392b;
+  color: #ffffff;
+  border: none;
+  font-family: 'Inter', sans-serif;
+  font-size: 15px;
+  font-weight: 500;
+  padding: 10px 26px;
+  border-radius: 999px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+  transition: background 0.2s, transform 0.15s;
+}
+
+.btn-logout:hover {
+  background: #a93226;
+  transform: translateY(-1px);
+}
+
+.btn-logout:active {
+  transform: scale(0.97);
+}

@@ -1,7 +1,17 @@
+"""
+services/ai.py — Layanan integrasi AI (LLM, Embedding, RAG)
+
+Fungsi utama:
+- Initialize dan caching LLM (Groq) & Embedding Model (HuggingFace)
+- Retrieval-Augmented Generation (RAG) untuk generate artikel dan tanya jawab
+- Query expansion (Sinonim & HyDE) untuk meningkatkan kualitas pencarian
+"""
+
 import os
 import json
 from typing import Optional
 from dotenv import load_dotenv
+from datetime import datetime
 
 from langchain_groq import ChatGroq
 from langchain_chroma import Chroma
@@ -49,16 +59,17 @@ logger_ai.info(f"AI Service initialized with LLM: {LLM_MODEL}")
 # ─── Singleton LLM ────────────────────────────────────────────────────────────
 
 _llm: Optional[ChatGroq] = None
+_embedding: Optional[HuggingFaceEmbeddings] = None
 
 
 def get_llm() -> ChatGroq:
     """
     Dapatkan LLM instance (singleton pattern).
     Lazy loading saat pertama kali dipanggil.
-    
+
     Returns:
         ChatGroq instance untuk generating answers
-    
+
     Raises:
         LLMInitializationError: Jika gagal initialize LLM
     """
@@ -72,6 +83,25 @@ def get_llm() -> ChatGroq:
             logger_ai.error(f"Failed to load LLM '{LLM_MODEL}': {e}")
             raise LLMInitializationError(LLM_MODEL, str(e))
     return _llm
+
+
+def get_embedding() -> HuggingFaceEmbeddings:
+    """
+    Dapatkan HuggingFaceEmbeddings instance (singleton pattern).
+
+    Model embedding (~500MB) hanya di-load SEKALI saat pertama kali
+    dipanggil, lalu di-cache di memory. Request berikutnya langsung
+    pakai instance yang sudah ada — menghemat 10–30 detik per request.
+
+    Returns:
+        HuggingFaceEmbeddings instance
+    """
+    global _embedding
+    if _embedding is None:
+        logger_ai.info(f"Loading embedding model: {EMBED_MODEL}")
+        _embedding = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+        logger_ai.info(f"Embedding model loaded: {EMBED_MODEL}")
+    return _embedding
 
 
 # ─── Load ChromaDB ────────────────────────────────────────────────────────────
@@ -104,7 +134,7 @@ def load_vectordb(vector_db_path: str) -> Chroma:
 
     try:
         logger_ai.debug(f"Loading ChromaDB from: {vector_db_path}")
-        embedding = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+        embedding = get_embedding()  # singleton — tidak di-load ulang
         vectordb = Chroma(
             persist_directory=vector_db_path,
             embedding_function=embedding,
@@ -121,7 +151,6 @@ def expand_query(question: str, llm) -> dict[str, list[str]]:
     """
     Terima 1 question, kembalikan dict query per seksi artikel.
     """
-    from datetime import datetime
     month_year = datetime.now().strftime("%B %Y")
 
     prompt = f"""Kamu membantu sistem yang membuat artikel otomatis.
@@ -333,7 +362,6 @@ def build_article_prompt(context: str, topic: str) -> str:
     Returns:
         Formatted prompt string untuk LLM
     """
-    from datetime import datetime
     month_year = datetime.now().strftime("%B %Y")
 
     return f"""Kamu adalah jurnalis analitik untuk institusi zakat dan filantropi Islam.
@@ -369,10 +397,108 @@ Mulai langsung dengan heading ## pertama, jangan tulis judul artikel atau pendah
 [Tulis 1 paragraf ringkasan singkat dan rekomendasi konkret bagi lembaga zakat atau filantropi Islam untuk berkontribusi.]"""
 
 
+# ─── Helper: Extract Sources dari Documents ──────────────────────────────────
+
+
+def _extract_sources(documents: list) -> list[dict]:
+    """
+    Extract sumber unik dari list dokumen yang di-retrieve.
+    
+    Setiap dokumen memiliki metadata dari CSV:
+    - Judul: Judul artikel/post
+    - Sumber: Nama sumber (Wikipedia, Twitter, GDELT, dll)
+    - URL: URL artikel
+    
+    Args:
+        documents: List of LangChain Document objects
+    
+    Returns:
+        list[dict] sources dengan structure:
+        {
+            "judul": str,
+            "sumber": str,
+            "url": str
+        }
+        Deduplicated by URL.
+    """
+    seen_urls = set()
+    sources = []
+    
+    for doc in documents:
+        metadata = doc.metadata if hasattr(doc, 'metadata') else {}
+        
+        judul = metadata.get('Judul', '').strip()
+        sumber = metadata.get('Sumber', '').strip()
+        url = metadata.get('URL', '').strip()
+        
+        # Skip jika tidak ada URL atau URL sudah ada
+        if not url or url in seen_urls:
+            continue
+        
+        seen_urls.add(url)
+        sources.append({
+            "judul": judul if judul else "Untitled",
+            "sumber": sumber if sumber else "Unknown",
+            "url": url,
+        })
+    
+    logger_ai.info(f"Extracted {len(sources)} unique sources")
+    return sources
+
+
+def _format_sources_section(sources: list[dict]) -> str:
+    """
+    Format sources list menjadi markdown references section.
+    
+    Args:
+        sources: list[dict] dari _extract_sources()
+    
+    Returns:
+        Markdown string dengan heading ## Sumber & Referensi
+    """
+    if not sources:
+        return ""
+    
+    markdown = "\n\n## Sumber & Referensi\n\n"
+    for i, src in enumerate(sources, 1):
+        # Format: [Judul (Sumber)](URL)
+        link = f"[{src['judul']} ({src['sumber']})]({src['url']})"
+        markdown += f"{i}. {link}\n"
+    
+    return markdown
+
+
+def _format_sources_for_display(sources: list[dict]) -> str:
+    """
+    Format sources menjadi markdown untuk ditampilkan di bawah artikel.
+    Digunakan untuk rendering di frontend (tidak disimpan ke DB, hanya untuk response).
+    
+    Args:
+        sources: list[dict] dari database query
+    
+    Returns:
+        Markdown string dengan heading ## Sumber & Referensi
+    """
+    if not sources:
+        return ""
+    
+    markdown = "\n\n## Sumber & Referensi\n\n"
+    for i, src in enumerate(sources, 1):
+        # Assume src bisa dict atau ArticleSource object
+        judul = src.get("judul") if isinstance(src, dict) else src.judul
+        sumber = src.get("sumber") if isinstance(src, dict) else src.sumber
+        url = src.get("url") if isinstance(src, dict) else src.url
+        
+        link = f"[{judul} ({sumber})]({url})"
+        markdown += f"{i}. {link}\n"
+    
+    return markdown
+
+
 # ─── Article Generator (Main) ─────────────────────────────────────────────────
 
 
-def generate_article(topic: str, vector_db_path: str) -> str:
+def generate_article(topic: str, vector_db_path: str) -> dict[str, object]:
     """
     Generate artikel multi-seksi (6 poin) dari topic menggunakan RAG pipeline.
 
@@ -386,7 +512,10 @@ def generate_article(topic: str, vector_db_path: str) -> str:
         vector_db_path: Path ke ChromaDB yang sudah di-crawl
 
     Returns:
-        Artikel dalam format Markdown string (6 seksi ## heading)
+        dict dengan keys:
+        - article: str — Artikel dalam format Markdown (6 seksi ## heading)
+        - sources: list[dict] — Source references (judul, sumber, url)
+                                Akan disimpan terpisah di table ArticleSource
 
     Raises:
         VectorDBNotFoundError: Jika ChromaDB tidak ditemukan
@@ -422,18 +551,25 @@ def generate_article(topic: str, vector_db_path: str) -> str:
         reranked_docs = rerank_to_docs(topic, all_docs)
         logger_ai.info(f"Reranking selesai: {len(reranked_docs)} docs dipilih")
 
-        # 5. Gabungkan context
+        # 5. Extract sources dari reranked docs
+        sources = _extract_sources(reranked_docs)
+        logger_ai.info(f"Extracted {len(sources)} sources")
+
+        # 6. Gabungkan context
         context = "\n\n".join([d.page_content for d in reranked_docs])
 
-        # 6. Build article prompt
+        # 7. Build article prompt
         prompt = build_article_prompt(context, topic)
 
-        # 7. Invoke LLM
+        # 8. Invoke LLM
         response = llm.invoke(prompt)
         article = response.content.strip()
 
-        logger_ai.info(f"Article generated ({len(article)} chars)")
-        return article
+        logger_ai.info(f"Article generated ({len(article)} chars, {len(sources)} sources)")
+        return {
+            "article": article,
+            "sources": sources,
+        }
 
     except (ValidationError, VectorDBNotFoundError, AIServiceError):
         raise

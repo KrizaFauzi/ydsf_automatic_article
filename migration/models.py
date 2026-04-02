@@ -136,6 +136,16 @@ class ChatSession(SQLModel, table=True):
         default=False,
         description="Apakah crawl sudah selesai & data siap untuk chat",
     )
+    processing_status: str = Field(
+        default="processing",
+        max_length=20,
+        description="Status: 'processing' | 'ready' | 'error'",
+    )
+    error_message: Optional[str] = Field(
+        default=None,
+        sa_column=Column(Text),
+        description="Pesan error jika background task gagal",
+    )
     summary: Optional[str] = Field(
         default=None,
         sa_column=Column(Text),
@@ -196,5 +206,61 @@ class ChatMessage(SQLModel, table=True):
     created_at: datetime = Field(
         default_factory=utcnow,
         description="Message creation timestamp",
+    )
+
+
+# ─── ArticleSource Model ──────────────────────────────────────────────────────
+
+
+class ArticleSource(SQLModel, table=True):
+    """
+    Model untuk menyimpan sources/references yang digunakan dalam artikel.
+    
+    Setiap source merepresentasikan satu dokumen/artikel yang dijadikan
+    referensi saat membuat artikel.
+    
+    Fields:
+    - id: UUID primary key
+    - session_id: Foreign key ke ChatSession
+    - judul: Judul artikel/post dari sumber
+    - sumber: Nama sumber (Wikipedia, Twitter, GDELT, NewsAPI, dll)
+    - url: URL artikel/post
+    - order: Urutan dalam daftar sources (untuk sorting)
+    - created_at: Timestamp saat source ditambahkan
+    """
+
+    __tablename__ = "article_sources"
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+        max_length=36,
+        description="UUID primary key",
+    )
+    session_id: str = Field(
+        foreign_key="chat_sessions.id",
+        max_length=36,
+        index=True,
+        description="Foreign key to ChatSession",
+    )
+    judul: str = Field(
+        sa_column=Column(Text),
+        description="Judul artikel/post dari sumber",
+    )
+    sumber: str = Field(
+        max_length=100,
+        description="Nama sumber (Wikipedia, Twitter, GDELT, NewsAPI, dll)",
+    )
+    url: str = Field(
+        sa_column=Column(Text),
+        description="URL artikel/post",
+    )
+    order: int = Field(
+        default=0,
+        description="Urutan dalam daftar sources (untuk sorting)",
+    )
+    created_at: datetime = Field(
+        default_factory=utcnow,
+        description="Timestamp saat source ditambahkan",
     )
 
