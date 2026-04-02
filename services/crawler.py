@@ -1,3 +1,10 @@
+"""
+services/crawler.py — Pipeline pengumpulan data dan indexing.
+
+Mensinergikan data dari berbagai sumber (News, Wikipedia, Wikidata, Twitter, Google)
+kemudian memproses dan menyimpannya ke vector database (ChromaDB) untuk RAG.
+"""
+
 import os
 import csv
 import shutil
@@ -26,7 +33,7 @@ from sources.social import fetch_twitter
 from sources.knowledge import fetch_wikipedia, fetch_wikidata
 
 # Query expansion sederhana (sinonim + HyDE) — hanya untuk tahap crawling
-from services.ai import expand_query_for_search, get_llm
+from services.ai import expand_query_for_search, get_llm, get_embedding
 
 load_dotenv()
 
@@ -126,13 +133,32 @@ def rebuild_vectordb(
         # 2. Load dokumen dari semua CSV
         logger_crawler.debug(f"Loading documents dari {len(csv_files)} CSV files")
         docs = []
+        from langchain_core.documents import Document
+
         for filepath in csv_files:
             if os.path.exists(filepath):
                 try:
                     logger_crawler.debug(f"Loading: {filepath}")
-                    docs.extend(
-                        CSVLoader(file_path=filepath, encoding="utf-8").load()
-                    )
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        for i, row in enumerate(reader):
+                            judul = row.get("Judul", "").strip()
+                            sumber = row.get("Sumber", "").strip()
+                            url = row.get("URL", "").strip()
+                            konten = row.get("Konten", "").strip()
+
+                            # Text combined for ChromaDB understanding
+                            page_content = f"Judul: {judul}\nSumber: {sumber}\nURL: {url}\n\n{konten}"
+
+                            # Explicit metadata injected so AI service can extract it later
+                            meta = {
+                                "source": filepath,
+                                "row": i,
+                                "Judul": judul,
+                                "Sumber": sumber,
+                                "URL": url,
+                            }
+                            docs.append(Document(page_content=page_content, metadata=meta))
                 except Exception as e:
                     logger_crawler.warning(f"Gagal load {filepath}: {e}")
                     continue
@@ -151,8 +177,8 @@ def rebuild_vectordb(
         logger_crawler.info(f"Total chunks: {len(chunks)}")
 
         # 4. Embeddings + ChromaDB
-        logger_crawler.debug(f"Initializing embeddings: {EMBED_MODEL_NAME}")
-        embedding = HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME)
+        logger_crawler.debug("Getting embedding model (singleton)...")
+        embedding = get_embedding()  # ambil dari singleton di ai.py
 
         Chroma.from_documents(
             documents=chunks,
@@ -258,15 +284,13 @@ def run_crawler(query: str, session_id: str) -> dict:
 
     Algorithm:
     1. Validasi input
-    2. Jalankan semua sumber dengan query asli (tanpa query expansion)
+    2. Jalankan semua sumber dengan query asli dan query expansion (sinonim + HyDE)
     3. Gabungkan semua hasil menjadi satu pool
     4. Simpan ke CSV per kategori
     5. Rebuild ChromaDB dari semua CSV
     6. Return metadata hasil crawling
 
     Catatan desain:
-    - Query expansion TIDAK dilakukan di sini. Ini adalah tahap "kumpulkan data".
-      Query expansion hanya dipakai di ai.py saat LLM menjawab pertanyaan.
     - Setiap sumber dijalankan via _run_source() yang mengisolasi error
     - Jika satu sumber gagal, sumber lain tetap berjalan
     - Crawler dianggap gagal total hanya jika SEMUA sumber menghasilkan 0 docs
