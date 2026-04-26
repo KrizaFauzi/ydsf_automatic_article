@@ -1,4 +1,4 @@
-# YDSF AI Article Chatbot
+# YDSF Automatic Article 
 
 YDSF Automatic Article adalah sebuah aplikasi berbasis web yang menyediakan layanan pembuatan artikel secara otomatis dengan dukungan teknologi AI berserta *Retrieval-Augmented Generation* (RAG).
 
