@@ -87,4 +87,4 @@ GET http://127.0.0.1:8000/health
 ```
 
 ---
-Diciptakan untuk YDSF - Automasi Penulisan Artikel & Manajemen FAQerdasarkan LLM dan RAG.
+Diciptakan untuk YDSF - Automasi Penulisan Artikel berdasarkan LLM dan RAG.
