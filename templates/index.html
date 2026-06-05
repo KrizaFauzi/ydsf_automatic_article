@@ -1,31 +1,113 @@
 <!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>YDSF – Generate Articles</title>
-  <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
-  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+<html lang="id">
 
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YDSF – Generate Articles</title>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Inter:wght@400;500;600&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 </head>
+
 <body class="page-home">
 
   {% include 'components/navbar.html' %}
 
-  <section class="hero">
-    <div class="hero-left">
-      <h1>Generate Articles Powered by Real-Time Trends</h1>
-      <p>Now you can generate articles by gathering information from social media and the internet, ensuring that your articles contain real, up-to-date data.</p>
-      <a href="/chat" class="btn-cta">Start Generate Articles</a>
-    </div>
-    <div class="hero-right">
-      <div class="globe-wrap">
-        <img src="../static/Asset/Globe.png" alt="Globe"
-             onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"/>
-        <div class="globe-placeholder" style="display:none;">Taruh gambar globe di sini</div>
+  <main>
+    <!-- HERO SECTION -->
+    <section class="hero">
+      <div class="hero-left">
+        <div class="badge">✨ YDSF AI Article Generator</div>
+        <h1>Buat Artikel Berkualitas <span>Dalam Hitungan Menit</span></h1>
+        <p>Hasilkan artikel dakwah dan edukasi yang relevan, terstruktur, dan berbasis data real-time dari internet dan
+          media sosial dengan bantuan AI cerdas.</p>
+        <div class="hero-buttons">
+          <a href="/chat" class="btn-cta">Coba Sekarang</a>
+          <a href="#features" class="btn-outline">Pelajari Lebih Lanjut</a>
+        </div>
       </div>
-    </div>
-  </section>
+      <div class="hero-right">
+        <div class="globe-wrap">
+          <img src="{{ url_for('static', path='Asset/Globe.png') }}" alt="Globe ilustrasi"
+            onerror="this.style.display='none';" />
+        </div>
+      </div>
+    </section>
+
+    <!-- FEATURES SECTION -->
+    <section id="features" class="features">
+      <div class="section-header">
+        <h2>Kenapa Menggunakan AI Kami?</h2>
+        <p>Sistem dirancang khusus untuk memenuhi kebutuhan divisi konten/publikasi dalam menyusun artikel secara cepat,
+          faktual, dan mendalam.</p>
+      </div>
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">🔍</div>
+          <h3>Real-time Crawling</h3>
+          <p>AI secara otomatis menelusuri artikel terbaru di Google Search dan postingan Twitter untuk memastikan data
+            yang diambil relevan dengan kejadian saat ini.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">⚡</div>
+          <h3>Cepat & Otomatis</h3>
+          <p>Tidak perlu riset berjam-jam. Hasilkan draft artikel komprehensif beserta sumber referensinya hanya
+            dalam waktu 3-4 menit saja.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">📝</div>
+          <h3>Format Terstruktur</h3>
+          <p>Artikel dihasilkan dengan format penulisan yang rapi, lengkap dengan Heading, bullet points, dan paragraf
+            pendukung yang siap dipublikasikan.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- HOW IT WORKS SECTION -->
+    <section class="how-it-works">
+      <div class="how-inner">
+        <div class="how-text">
+          <h2>Cara Kerja Sistem AI</h2>
+          <ul class="steps-list">
+            <li>
+              <div class="step-num">1</div>
+              <div class="step-desc">
+                <h4>Masukkan Topik Pembahasan</h4>
+                <p>Cukup ketik ide atau topik utama yang ingin dibuat artikelnya, contoh: "Manfaat Wakaf Produktif" atau
+                  "Kurban 2026".</p>
+              </div>
+            </li>
+            <li>
+              <div class="step-num">2</div>
+              <div class="step-desc">
+                <h4>AI Mengumpulkan & Menganalisis Data</h4>
+                <p>Agen AI akan mulai mencari data terbaru ke berbagai mesin pencari, lalu merangkum informasinya (RAG)
+                  untuk Anda.</p>
+              </div>
+            </li>
+            <li>
+              <div class="step-num">3</div>
+              <div class="step-desc">
+                <h4>Artikel Siap Digunakan</h4>
+                <p>AI akan menulis artikel lengkap beserta sumber referensi yang dapat Anda salin (copy) langsung ke
+                  platform penerbitan Anda.</p>
+              </div>
+            </li>
+          </ul>
+        </div>
+        <div class="how-image">
+          <div class="abstract-shape"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>&copy; 2026 Yayasan Dana Sosial al-Falah (YDSF). All rights reserved.</p>
+  </footer>
 
 </body>
+
 </html>

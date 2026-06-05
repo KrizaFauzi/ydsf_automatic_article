@@ -127,6 +127,7 @@ class APICallError(AppException):
 # ─── Database Exceptions ────────────────────────────────────────────────────
 
 class DatabaseError(AppException):
-    """Saat operasi database gagal"""
-    def __init__(self, message: str, details: Optional[dict] = None):
+    """Saat operasi database gagal. Message user-friendly, detail technical di details."""
+    def __init__(self, message: str = "Gagal memproses permintaan ke database", details: Optional[dict] = None):
+        # Keamanan: Jangan leak raw DB error ke 'message' jika possible
         super().__init__(message, status_code=500, error_code="DATABASE_ERROR", details=details)

@@ -9,7 +9,9 @@ Fungsi utama:
 
 import os
 import json
-from typing import Optional
+import asyncio
+import re
+from typing import Optional, Any
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -18,6 +20,7 @@ from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 
 from services.reranker import rerank_to_docs
+from schemas.chat import ArticleConfig
 
 from core.logger import logger_ai
 from core.exceptions import (
@@ -28,6 +31,7 @@ from core.exceptions import (
 )
 from core.constants import (
     DEFAULT_LLM_MODEL,
+    DEFAULT_LLM_MODEL_FAST,
     DEFAULT_EMBED_MODEL,
     VECTOR_DB_BASE_PATH,
     VECTOR_RETRIEVAL_K,
@@ -43,6 +47,7 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", VECTOR_DB_BASE_PATH)
 EMBED_MODEL = os.getenv("EMBED_MODEL", DEFAULT_EMBED_MODEL)
 LLM_MODEL = os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)
+LLM_MODEL_FAST = os.getenv("LLM_MODEL_FAST", DEFAULT_LLM_MODEL_FAST)
 
 # Validate required env vars
 if not GROQ_API_KEY:
@@ -53,594 +58,447 @@ if not HF_TOKEN:
 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
 os.environ["HF_TOKEN"] = HF_TOKEN
 
-logger_ai.info(f"AI Service initialized with LLM: {LLM_MODEL}")
+logger_ai.info(f"AI Service initialized: Complex={LLM_MODEL}, Fast={LLM_MODEL_FAST}")
 
 
 # ─── Singleton LLM ────────────────────────────────────────────────────────────
 
 _llm: Optional[ChatGroq] = None
+_llm_fast: Optional[ChatGroq] = None
 _embedding: Optional[HuggingFaceEmbeddings] = None
 
 
-def get_llm() -> ChatGroq:
-    """
-    Dapatkan LLM instance (singleton pattern).
-    Lazy loading saat pertama kali dipanggil.
-
-    Returns:
-        ChatGroq instance untuk generating answers
-
-    Raises:
-        LLMInitializationError: Jika gagal initialize LLM
-    """
+def get_llm(model_name: Optional[str] = None) -> ChatGroq:
+    """Complex model (70B) untuk generation."""
     global _llm
+    target_model = model_name or LLM_MODEL
+    
+    # Jika model_name diberikan dan berbeda dari singleton saat ini, buat baru
+    if model_name and _llm and _llm.model_name != model_name:
+        try:
+            new_llm = ChatGroq(model=model_name, temperature=LLM_TEMPERATURE)
+            logger_ai.info(f"Custom LLM loaded: {model_name}")
+            return new_llm
+        except Exception as e:
+            logger_ai.error(f"Failed to load custom LLM {model_name}: {e}")
+            return _llm # Fallback ke default singleton
+
     if _llm is None:
         try:
-            logger_ai.info(f"Initializing LLM: {LLM_MODEL}")
-            _llm = ChatGroq(model=LLM_MODEL, temperature=LLM_TEMPERATURE)
-            logger_ai.info(f"LLM successfully loaded: {LLM_MODEL}")
+            _llm = ChatGroq(model=target_model, temperature=LLM_TEMPERATURE)
+            logger_ai.info(f"Complex LLM loaded: {target_model}")
         except Exception as e:
-            logger_ai.error(f"Failed to load LLM '{LLM_MODEL}': {e}")
-            raise LLMInitializationError(LLM_MODEL, str(e))
+            logger_ai.error(f"Failed to load complex LLM: {e}")
+            raise LLMInitializationError(target_model, str(e))
     return _llm
 
 
+def get_llm_fast() -> ChatGroq:
+    """Fast model (8B) untuk overhead tasks (expansion, etc)."""
+    global _llm_fast
+    if _llm_fast is None:
+        try:
+            _llm_fast = ChatGroq(model=LLM_MODEL_FAST, temperature=LLM_TEMPERATURE)
+            logger_ai.info(f"Fast LLM loaded: {LLM_MODEL_FAST}")
+        except Exception as e:
+            logger_ai.error(f"Failed to load fast LLM: {e}")
+            raise LLMInitializationError(LLM_MODEL_FAST, str(e))
+    return _llm_fast
+
+
 def get_embedding() -> HuggingFaceEmbeddings:
-    """
-    Dapatkan HuggingFaceEmbeddings instance (singleton pattern).
-
-    Model embedding (~500MB) hanya di-load SEKALI saat pertama kali
-    dipanggil, lalu di-cache di memory. Request berikutnya langsung
-    pakai instance yang sudah ada — menghemat 10–30 detik per request.
-
-    Returns:
-        HuggingFaceEmbeddings instance
-    """
     global _embedding
     if _embedding is None:
-        logger_ai.info(f"Loading embedding model: {EMBED_MODEL}")
         _embedding = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
-        logger_ai.info(f"Embedding model loaded: {EMBED_MODEL}")
     return _embedding
+
+
+# ─── Utilities ────────────────────────────────────────────────────────────────
+
+def parse_json_from_text(text: str) -> dict[str, Any]:
+    """Robust JSON extraction from LLM response."""
+    try:
+        # 1. Clean markdown blocks
+        clean_text = text.strip()
+        if "```" in clean_text:
+            match = re.search(r"```(?:json)?\s*(.*?)\s*```", clean_text, re.DOTALL)
+            if match:
+                clean_text = match.group(1)
+
+        # 2. Extract first { or [ object
+        start_idx = clean_text.find('{')
+        end_idx = clean_text.rfind('}')
+        if start_idx != -1 and end_idx != -1:
+            clean_text = clean_text[start_idx : end_idx + 1]
+
+        return json.loads(clean_text)
+    except Exception as e:
+        logger_ai.error(f"JSON parsing failed: {e}. Raw text: {text[:200]}...")
+        raise AIServiceError(f"Gagal memproses data AI: JSON invalid")
 
 
 # ─── Load ChromaDB ────────────────────────────────────────────────────────────
 
 
 def load_vectordb(vector_db_path: str) -> Chroma:
-    """
-    Load ChromaDB dari specified path.
-    
-    Args:
-        vector_db_path: Path ke ChromaDB directory
-    
-    Returns:
-        Chroma instance untuk retrieval
-    
-    Raises:
-        ValidationError: Jika vector_db_path kosong
-        VectorDBNotFoundError: Jika path tidak ada
-        AIServiceError: Jika gagal load ChromaDB
-    """
-    # Validate input
     if not vector_db_path or not vector_db_path.strip():
-        logger_ai.warning("vector_db_path is empty")
         raise ValidationError("Path ke ChromaDB tidak boleh kosong")
 
-    # Check path existence
-    if not os.path.exists(vector_db_path):
-        logger_ai.warning(f"ChromaDB path not found: {vector_db_path}")
+    if not os.path.exists(vector_db_path) or not os.path.isdir(vector_db_path):
         raise VectorDBNotFoundError(vector_db_path)
 
     try:
-        logger_ai.debug(f"Loading ChromaDB from: {vector_db_path}")
-        embedding = get_embedding()  # singleton — tidak di-load ulang
-        vectordb = Chroma(
+        embedding = get_embedding()
+        return Chroma(
             persist_directory=vector_db_path,
             embedding_function=embedding,
         )
-        logger_ai.info(f"ChromaDB successfully loaded from: {vector_db_path}")
-        return vectordb
     except Exception as e:
-        logger_ai.error(f"Failed to load ChromaDB from '{vector_db_path}': {e}")
-        raise AIServiceError(f"Gagal load ChromaDB: {str(e)}", {"path": vector_db_path})
+        logger_ai.error(f"ChromaDB load failed: {e}")
+        raise AIServiceError(f"Gagal load ChromaDB: {str(e)}")
 
 
 # ─── Prompt Builder ───────────────────────────────────────────────────────────
-def expand_query(question: str, llm) -> dict[str, list[str]]:
-    """
-    Terima 1 question, kembalikan dict query per seksi artikel.
-    """
+
+async def expand_query(question: str, llm, seo_keywords: Optional[list[str]] = None) -> dict[str, list[str]]:
     month_year = datetime.now().strftime("%B %Y")
-
+    seo_text = f"\nOptimasi untuk keywords SEO: {', '.join(seo_keywords)}" if seo_keywords else ""
+    
     prompt = f"""Kamu membantu sistem yang membuat artikel otomatis.
-Dari topik berikut, buat query pencarian yang dikelompokkan per seksi artikel.
-
+Dari topik berikut, buat query pencarian yang dikelompokkan per seksi artikel.{seo_text}
 Topik: "{question}"
 Bulan sekarang: {month_year}
-
-Balas HANYA dengan JSON berikut, tidak ada teks lain:
-{{
-  "universal": [
-    "nama asli topik",
-    "alias atau akronim topik",
-    "topik dalam bahasa Inggris",
-    "topik {month_year}",
-    "topik terbaru"
-  ],
-  "latar_belakang": [
-    "query untuk sejarah dan asal-usul topik ini",
-    "query untuk konteks historis jangka panjang"
-  ],
-  "ringkasan": [
-    "query untuk situasi dan kondisi terkini {month_year}",
-    "query untuk perkembangan terbaru"
-  ],
-  "tokoh": [
-    "query untuk pemimpin dan tokoh kunci yang terlibat",
-    "query untuk organisasi dan pihak yang terlibat"
-  ],
-  "konflik": [
-    "query untuk konflik dan ketegangan yang sedang terjadi",
-    "query untuk insiden dan peristiwa spesifik"
-  ],
-  "prediksi": [
-    "query untuk analisis dan proyeksi ke depan",
-    "query untuk skenario kemungkinan resolusi"
-  ]
-}}"""
+Balas HANYA dengan JSON objek yang berisi list query untuk: universal, latar_belakang, ringkasan, tokoh, konflik, prediksi."""
 
     try:
-        response = llm.invoke(prompt)
-        raw = response.content.strip()
+        response = await llm.ainvoke(prompt)
+        result = parse_json_from_text(response.content)
 
-        # Bersihkan jika LLM membungkus dengan ```json ... ```
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-
-        result = json.loads(raw)
-
-        # Pastikan question asli selalu ada di universal
         if question not in result.get("universal", []):
-            result["universal"].insert(0, question)
-
+            result.setdefault("universal", []).insert(0, question)
+        
+        # Inject SEO keywords into universal queries if provided
+        if seo_keywords:
+            for kw in seo_keywords:
+                if kw not in result["universal"]:
+                    result["universal"].append(f"{question} {kw}")
+                    
         return result
-
     except Exception:
-        logger_ai.warning("Query expansion gagal, fallback ke question asli")
-        # Fallback: struktur minimal agar ask() tetap jalan
-        return {
-            "universal": [question],
-            "latar_belakang": [question],
-            "ringkasan": [question],
-            "tokoh": [question],
-            "konflik": [question],
-            "prediksi": [question],
-        }
+        logger_ai.warning("Query expansion fallback")
+        return {k: [question] for k in ["universal", "latar_belakang", "ringkasan", "tokoh", "konflik", "prediksi"]}
 
 
-# ─── Query Expansion untuk Data Fetching (Sinonim + HyDE) ────────────────────
-
-
-def expand_query_for_search(query: str, llm) -> list[str]:
-    """
-    Query expansion sederhana khusus untuk tahap pengumpulan data (crawler).
-
-    Menghasilkan variasi query yang lebih luas tanpa struktur per-seksi,
-    cukup dengan dua teknik klasik:
-
-    1. Sinonim / alias / terjemahan
-       Menangkap dokumen yang menggunakan kata berbeda untuk konsep sama.
-       Contoh: "kecerdasan buatan" → "AI", "artificial intelligence", "deep learning"
-
-    2. HyDE — Hypothetical Document Embeddings
-       LLM membayangkan seperti apa dokumen yang ideal untuk menjawab query,
-       lalu kalimat hipotetis itu dijadikan query tambahan.
-       Teknik ini sangat efektif karena embedding HyDE lebih mirip
-       dengan embedding dokumen asli di database.
-       Referensi: Gao et al. 2022 (https://arxiv.org/abs/2212.10496)
-
-    Hasilnya: list query yang pendek (3–5 item), cocok untuk API calls.
-    Tidak perlu kompleks — cukup buka pintu ke variasi leksikal dan semantik.
-
-    Args:
-        query: Query/topik asli dari user
-        llm: LLM instance (ChatGroq)
-
-    Returns:
-        list[str] — query asli + sinonim + HyDE. Selalu minimal [query].
-    """
-    prompt = f"""Kamu membantu sistem pencarian informasi.
-Dari topik berikut, bantu perluas pencarian dengan 2 cara:
-
-Topik: "{query}"
-
-Balas HANYA dengan JSON ini, tidak ada teks lain:
-{{
-  "sinonim": [
-    "alias, akronim, atau terjemahan bahasa Inggris dari topik",
-    "istilah lain yang sering menggantikan topik ini"
-  ],
-  "hyde": "Tulis 1 kalimat fakta singkat (max 25 kata) seolah-olah kamu membaca artikel tentang topik ini"
-}}"""
+async def expand_query_for_search(query: str, llm) -> list[str]:
+    prompt = f"""Topik: "{query}"
+Bantu perluas pencarian. Balas HANYA dengan JSON: {{"sinonim": ["list synonym/alias"], "hyde": "1 fakta singkat"}}.
+HyDE adalah kalimat imajiner yang seolah-olah menjawab topik tersebut."""
 
     try:
-        response = llm.invoke(prompt)
-        raw = response.content.strip()
-
-        # Bersihkan jika LLM membungkus dengan ```json ... ```
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-
-        data = json.loads(raw)
-
-        queries: list[str] = [query]  # query asli selalu pertama
-
-        # Tambahkan sinonim (buang duplikat dan string kosong)
+        response = await llm.ainvoke(prompt)
+        data = parse_json_from_text(response.content)
+        queries: list[str] = [query]
         for syn in data.get("sinonim", []):
-            syn = syn.strip()
-            if syn and syn.lower() != query.lower() and syn not in queries:
-                queries.append(syn)
-
-        # Tambahkan kalimat HyDE sebagai query semantik
-        hyde = data.get("hyde", "").strip()
-        if hyde and hyde not in queries:
-            queries.append(hyde)
-
-        logger_ai.info(f"expand_query_for_search: {len(queries)} queries dari '{query[:40]}'")
-        return queries
-
-    except Exception as e:
-        logger_ai.warning(f"expand_query_for_search gagal ({e}), fallback ke query asli")
+            if syn and syn.lower() != query.lower(): queries.append(syn)
+        if data.get("hyde"): queries.append(data["hyde"])
+        return list(dict.fromkeys(queries))
+    except Exception:
         return [query]
 
 
 def build_prompt(context: str, history: list, question: str) -> str:
-    """
-    Build combined prompt dari context, history, dan question.
+    history_text = "\n".join([f"{'User' if m['role']=='user' else 'Bot'}: {m['content']}" for m in history])
+    return f"""Context:
+{context}
+
+History:
+{history_text}
+
+Question: {question}
+
+Answer (Always respond in rich Markdown format with bold text, lists, and clear structure):"""
+
+
+def build_article_prompt(context: str, config: ArticleConfig) -> str:
+    month_year = datetime.now().strftime("%B %Y")
     
-    Args:
-        context: Retrieved dokumen content
-        history: Chat history (list of {role, content} dicts)
-        question: User question
+    # Length mapping
+    length_desc = {
+        "short": "singkat dan padat (sekitar 500 kata)",
+        "medium": "komprehensif (sekitar 1200 kata)",
+        "long": "mendalam dan detail (sekitar 2500 kata)"
+    }.get(config.length, "komprehensif")
+
+    # Determine Mode
+    has_blueprint = bool(config.additional_info or config.key_points)
+
+    prompt = f"""Role: Senior Philanthropy Journalist & Editor.
+Topic: "{config.topic}" ({month_year})
+Target Length: {length_desc}
+
+<INSTRUCTIONS>
+Tugas Anda adalah menulis artikel berkualitas tinggi dan profesional. 
+Gunakan Bahasa Indonesia yang mengalir, elegan, dan informatif.
+Anda diberikan data riset di bawah dalam format [ID] Judul | Sumber.
+PENTING: Anda WAJIB menyertakan sitasi berupa nomor ID di akhir kalimat atau paragraf yang menggunakan informasi tersebut, contoh: "Data menunjukkan peningkatan donasi sebesar 20% [1]."
+Hanya gunakan data yang benar-benar relevan dan dibutuhkan untuk membangun argumen yang kuat.
+</INSTRUCTIONS>
+"""
+
+    # Mode A: Strict Blueprint Mode
+    if has_blueprint:
+        prompt += "\n<USER_BLUEPRINT>\n"
+        prompt += "Anda WAJIB mengikuti struktur persis di bawah ini. Setiap poin harus menjadi bagian utama (Heading H2).\n"
+        
+        if config.additional_info:
+            prompt += f"Fakta/Konteks Utama yang WAJIB dimasukkan: {config.additional_info}\n"
+        
+        if config.key_points:
+            prompt += "Outline yang WAJIB digunakan (H2):\n- " + "\n- ".join(config.key_points) + "\n"
+        
+        prompt += "</USER_BLUEPRINT>\n"
     
-    Returns:
-        Formatted prompt string untuk LLM
-    
-    Raises:
-        ValidationError: Jika question kosong
-    """
-    # Validate question
-    if not question or not question.strip():
-        logger_ai.warning("Question is empty")
-        raise ValidationError("Pertanyaan tidak boleh kosong")
+    # Mode B: Creative Expert Mode (Standard Structure)
+    else:
+        prompt += "\n<STANDARD_STRUCTURE>\n"
+        prompt += "Gunakan struktur jurnalistik profesional berikut:\n"
+        prompt += "1. Latar Belakang & Urgensi (H2)\n"
+        prompt += "2. Pembahasan Utama & Analisis (H2)\n"
+        prompt += "3. Studi Kasus / Contoh Nyata (H2)\n"
+        prompt += "4. Kesimpulan & Rekomendasi (H2)\n"
+        prompt += "</STANDARD_STRUCTURE>\n"
 
-    # Format history
-    history_text = ""
-    for i, msg in enumerate(history):
-        role = "User" if msg.get("role") == "user" else "Bot"
-        content = msg.get("content", "").strip()
-        history_text += f"{role}: {content}\n"
+    # Integration of Research Data (RAG)
+    if context.strip():
+        prompt += f"\n<RESEARCH_DATA>\n"
+        prompt += "Gunakan data riset berikut. JANGAN gunakan informasi yang tidak relevan.\n"
+        prompt += f"{context}\n"
+        prompt += "</RESEARCH_DATA>\n"
+    else:
+        prompt += "\n<RESEARCH_DATA>\n"
+        prompt += "Tidak ada data riset eksternal. Gunakan pengetahuan ahli Anda.\n"
+        prompt += "</RESEARCH_DATA>\n"
 
-    # Build prompt
-    prompt = f"""Use the following context and conversation history to answer the question.
-Answer in the same language as the question. Be concise and helpful.
+    # Constraints & Final Output Rules
+    prompt += "\n<CONSTRAINTS>\n"
+    prompt += "1. Output WAJIB dalam format Markdown yang rapi.\n"
+    if config.seo_keywords:
+        prompt += f"2. Integrasikan keywords SEO secara natural: {', '.join(config.seo_keywords)}\n"
+    else:
+        prompt += "2. Pastikan alur tulisan logis dan profesional.\n"
+    prompt += "3. JANGAN mengarang statistik atau data yang tidak ada di RESEARCH_DATA.\n"
+    prompt += "4. DILARANG KERAS membuat seksi 'Referensi', 'Sumber', atau 'Daftar Pustaka' di akhir artikel. Tulis isi artikel saja. Sistem akan menambahkan referensi secara terpisah.\n"
+    prompt += "5. Pastikan sitasi nomor ID [X] muncul di dalam teks jika Anda mengambil data dari riset.\n"
+    prompt += "6. Batasi hingga maksimal 10 seksi utama.\n"
+    prompt += "</CONSTRAINTS>\n"
 
-Context:
-{context if context.strip() else "No context available."}
-
-Conversation History:
-{history_text if history_text.strip() else "No conversation history."}
-
-Question:
-{question}
-
-Answer:"""
-
-    logger_ai.debug(f"Prompt built ({len(prompt)} chars)")
     return prompt
 
 
-# ─── Article Prompt Builder ──────────────────────────────────────────────────
+def strip_reference_section(content: str) -> str:
+    """Hapus seksi referensi/sumber yang mungkin dibuat oleh LLM secara redundan dengan regex yang lebih agresif."""
+    # Cari heading yang mirip referensi atau daftar pustaka, atau garis pemisah diikuti referensi
+    patterns = [
+        r"\n\s*(?:##+|###+)\s*(?:Referensi|Sumber|Daftar Pustaka|Bibliography|References|Sources).*",
+        r"\n\s*---\s*\n\s*(?:Referensi|Sumber|Daftar Pustaka|Bibliography).*",
+        r"\n\s*\*\*(?:Referensi|Sumber|Daftar Pustaka|Bibliography|Sources)\*\*.*",
+        r"\n\s*Sources:.*",
+        r"\n\s*References:.*",
+    ]
+    for pattern in patterns:
+        # Gunakan re.split dan ambil bagian pertama saja untuk memotong teks
+        content = re.split(pattern, content, flags=re.IGNORECASE | re.DOTALL)[0]
+    
+    return content.strip()
 
 
-def build_article_prompt(context: str, topic: str) -> str:
-    """
-    Build prompt untuk menghasilkan artikel terstruktur dengan 6 seksi.
-
-    Setiap seksi menghasilkan 1-2 paragraf yang berfokus pada satu aspek
-    konflik/masalah, membantu institusi yayasan dana memahami situasi.
-
-    Args:
-        context: Retrieved dokumen content dari ChromaDB
-        topic: Topik artikel
-
-    Returns:
-        Formatted prompt string untuk LLM
-    """
-    month_year = datetime.now().strftime("%B %Y")
-
-    return f"""Kamu adalah jurnalis analitik untuk institusi zakat dan filantropi Islam.
-
-Topik: "{topic}"
-Bulan/Tahun: {month_year}
-
-Data referensi dari berbagai sumber:
-{context if context.strip() else "Data terbatas tersedia, gunakan pengetahuanmu."}
-
-Tulis artikel informatif berdasarkan data di atas dengan TEPAT 6 seksi berikut.
-Setiap seksi terdiri dari 1-2 paragraf padat dan informatif.
-Gunakan Bahasa Indonesia yang formal namun mudah dipahami.
-Jangan tambahkan seksi lain di luar yang diminta.
-Mulai langsung dengan heading ## pertama, jangan tulis judul artikel atau pendahuluan sebelumnya.
-
-## Latar Belakang
-[Tulis 1-2 paragraf tentang sejarah dan asal-usul konflik/isu ini. Kapan dan mengapa mulai terjadi.]
-
-## Situasi Terkini
-[Tulis 1-2 paragraf tentang kondisi nyata di lapangan per {month_year}. Perkembangan paling baru.]
-
-## Pihak yang Terlibat
-[Tulis 1-2 paragraf tentang tokoh kunci, kelompok, dan organisasi yang terlibat: korban, pelaku, mediator.]
-
-## Dampak Kemanusiaan
-[Tulis 1-2 paragraf tentang dampak terhadap warga sipil, angka korban atau pengungsi, kemiskinan, pendidikan, dan kesehatan.]
-
-## Respons & Upaya Solusi
-[Tulis 1-2 paragraf tentang langkah-langkah yang sudah diambil oleh pemerintah, NGO, komunitas internasional, atau lembaga kemanusiaan.]
-
-## Penutup & Rekomendasi
-[Tulis 1 paragraf ringkasan singkat dan rekomendasi konkret bagi lembaga zakat atau filantropi Islam untuk berkontribusi.]"""
+# ─── Article Generator ────────────────────────────────────────────────────────
 
 
-# ─── Helper: Extract Sources dari Documents ──────────────────────────────────
+async def generate_article(config: ArticleConfig, vector_db_path: Optional[str] = None) -> dict[str, Any]:
+    topic = config.topic
+    logger_ai.info(f"Generating advanced article: {topic[:50]}")
+    try:
+        context = ""
+        sources = []
+        
+        # Only use RAG if vector_db_path is provided
+        if vector_db_path and vector_db_path.strip():
+            vectordb = load_vectordb(vector_db_path)
+            retriever = vectordb.as_retriever(search_kwargs={"k": VECTOR_RETRIEVAL_K})
+            llm_fast = get_llm_fast()
 
+            # 1. Expand (Async) with SEO consideration
+            query_map = await expand_query(topic, llm_fast, config.seo_keywords)
+
+            # 2. Parallel Retrieval
+            all_queries = []
+            for queries in query_map.values(): all_queries.extend(queries)
+
+            # Execute retrievals in parallel
+            retrieval_tasks = [retriever.ainvoke(q) for q in all_queries]
+            docs_results = await asyncio.gather(*retrieval_tasks)
+
+            # Flatten and Deduplicate by content hash
+            all_docs = []
+            seen_contents = set()
+            for doc_list in docs_results:
+                for doc in doc_list:
+                    # Case-insensitive content deduplication
+                    content_normalized = doc.page_content.strip().lower()
+                    content_hash = hash(content_normalized)
+                    if content_hash not in seen_contents:
+                        seen_contents.add(content_hash)
+                        all_docs.append(doc)
+
+            # 3. Rerank
+            # Perkecil pool rerank ke top 10 agar lebih fokus
+            reranked_docs = rerank_to_docs(topic, all_docs, top_n=10)
+            
+            # 4. Build Context with Citations
+            context_parts = []
+            temp_sources = []
+            seen_urls = set()
+            
+            for i, doc in enumerate(reranked_docs, 1):
+                meta = doc.metadata or {}
+                url = meta.get('URL', '').strip()
+                if not url: continue
+                
+                # Normalize URL to prevent duplicates
+                norm_url = url.lower().strip().rstrip('/')
+                if '://' in norm_url:
+                    norm_url = norm_url.split('://', 1)[1]
+                
+                if norm_url not in seen_urls:
+                    seen_urls.add(norm_url)
+                    judul = meta.get('Judul', 'Untitled').strip()
+                    sumber = meta.get('Sumber', 'Unknown').strip()
+                    
+                    context_parts.append(f"[{i}] {judul} | {sumber}\n{doc.page_content}")
+                    temp_sources.append({
+                        "id": i,
+                        "judul": judul,
+                        "sumber": sumber,
+                        "url": url
+                    })
+            
+            context = "\n\n".join(context_parts)
+            sources = temp_sources
+        else:
+            logger_ai.info(f"No vector_db_path provided for '{topic}', generating from LLM knowledge only.")
+
+        # 5. Generation
+        # Use custom model if requested
+        llm = get_llm(config.model_choice)
+        response = await llm.ainvoke(build_article_prompt(context, config))
+        article_text = response.content.strip()
+        
+        # 6. Filtering Sources by Citations
+        # Cari angka di dalam kurung siku, misal [1], [2]
+        cited_ids = set(re.findall(r"\[(\d+)\]", article_text))
+        final_sources = [s for s in sources if str(s.get("id")) in cited_ids]
+        
+        # Strip redundant reference section from LLM
+        clean_content = strip_reference_section(article_text)
+
+        # Jika LLM lupa sitasi tapi kita punya sources, berikan top 3 sebagai fallback
+        if not final_sources and sources:
+            final_sources = sources[:3]
+
+        return {"article": clean_content, "sources": final_sources}
+
+    except Exception as e:
+        logger_ai.error(f"Error in generate_article: {e}", exc_info=True)
+        raise AIServiceError(f"Gagal generate artikel: {str(e)}")
+
+
+async def ask(question: str, vector_db_path: Optional[str] = None, history: Optional[list] = None, model_name: Optional[str] = None) -> str:
+    try:
+        context = ""
+        
+        # Only use RAG if vector_db_path is provided
+        if vector_db_path and vector_db_path.strip():
+            vectordb = load_vectordb(vector_db_path)
+            retriever = vectordb.as_retriever(search_kwargs={"k": VECTOR_RETRIEVAL_K})
+            llm_fast = get_llm_fast()
+
+            # Expand & Retrieve (Parallel)
+            queries = await expand_query_for_search(question, llm_fast)
+            retrieval_tasks = [retriever.ainvoke(q) for q in queries]
+            docs_results = await asyncio.gather(*retrieval_tasks)
+
+            all_docs = []
+            seen = set()
+            for dl in docs_results:
+                for d in dl:
+                    if d.page_content not in seen:
+                        seen.add(d.page_content); all_docs.append(d)
+
+            # Rerank and Build Context with ID citations
+            reranked = rerank_to_docs(question, all_docs, top_n=5)
+            context_parts = []
+            for i, d in enumerate(reranked, 1):
+                meta = d.metadata or {}
+                sumber = meta.get('Sumber', 'Unknown').strip()
+                context_parts.append(f"[{i}] Sumber: {sumber}\n{d.page_content}")
+            
+            context = "\n\n".join(context_parts)
+        else:
+            logger_ai.info(f"No vector_db_path provided for question, generating from LLM knowledge only.")
+
+        llm = get_llm(model_name)
+        
+        # Build prompt with citation instruction
+        history_text = "\n".join([f"{'User' if m['role']=='user' else 'Bot'}: {m['content']}" for m in history or []])
+        system_prompt = f"""Context:
+{context}
+
+History:
+{history_text}
+
+Question: {question}
+
+Answer:
+(Berikan jawaban informatif dalam Bahasa Indonesia. Gunakan sitasi [nomor ID] jika mengambil informasi dari Context. Balas dalam format Markdown yang rapi.)"""
+
+        response = await llm.ainvoke(system_prompt)
+        return response.content.strip()
+    except Exception as e:
+        logger_ai.error(f"Error in ask: {e}")
+        raise AIServiceError(f"Gagal generate jawaban: {str(e)}")
+
+
+# ─── Helper: Sources ──────────────────────────────────────────────────────────
 
 def _extract_sources(documents: list) -> list[dict]:
-    """
-    Extract sumber unik dari list dokumen yang di-retrieve.
-    
-    Setiap dokumen memiliki metadata dari CSV:
-    - Judul: Judul artikel/post
-    - Sumber: Nama sumber (Wikipedia, Twitter, GDELT, dll)
-    - URL: URL artikel
-    
-    Args:
-        documents: List of LangChain Document objects
-    
-    Returns:
-        list[dict] sources dengan structure:
-        {
-            "judul": str,
-            "sumber": str,
-            "url": str
-        }
-        Deduplicated by URL.
-    """
     seen_urls = set()
     sources = []
-    
     for doc in documents:
-        metadata = doc.metadata if hasattr(doc, 'metadata') else {}
+        meta = doc.metadata or {}
+        url = meta.get('URL', '').strip()
+        if not url: continue
         
-        judul = metadata.get('Judul', '').strip()
-        sumber = metadata.get('Sumber', '').strip()
-        url = metadata.get('URL', '').strip()
+        # Super robust normalization to prevent duplicates
+        norm_url = url.lower().strip().rstrip('/')
+        if '://' in norm_url:
+            norm_url = norm_url.split('://', 1)[1]
         
-        # Skip jika tidak ada URL atau URL sudah ada
-        if not url or url in seen_urls:
-            continue
-        
-        seen_urls.add(url)
-        sources.append({
-            "judul": judul if judul else "Untitled",
-            "sumber": sumber if sumber else "Unknown",
-            "url": url,
-        })
-    
-    logger_ai.info(f"Extracted {len(sources)} unique sources")
+        if norm_url not in seen_urls:
+            seen_urls.add(norm_url)
+            sources.append({
+                "judul": meta.get('Judul', 'Untitled').strip(),
+                "sumber": meta.get('Sumber', 'Unknown').strip(),
+                "url": url,
+            })
     return sources
 
 
 def _format_sources_section(sources: list[dict]) -> str:
-    """
-    Format sources list menjadi markdown references section.
-    
-    Args:
-        sources: list[dict] dari _extract_sources()
-    
-    Returns:
-        Markdown string dengan heading ## Sumber & Referensi
-    """
-    if not sources:
-        return ""
-    
-    markdown = "\n\n## Sumber & Referensi\n\n"
-    for i, src in enumerate(sources, 1):
-        # Format: [Judul (Sumber)](URL)
-        link = f"[{src['judul']} ({src['sumber']})]({src['url']})"
-        markdown += f"{i}. {link}\n"
-    
-    return markdown
-
-
-def _format_sources_for_display(sources: list[dict]) -> str:
-    """
-    Format sources menjadi markdown untuk ditampilkan di bawah artikel.
-    Digunakan untuk rendering di frontend (tidak disimpan ke DB, hanya untuk response).
-    
-    Args:
-        sources: list[dict] dari database query
-    
-    Returns:
-        Markdown string dengan heading ## Sumber & Referensi
-    """
-    if not sources:
-        return ""
-    
-    markdown = "\n\n## Sumber & Referensi\n\n"
-    for i, src in enumerate(sources, 1):
-        # Assume src bisa dict atau ArticleSource object
-        judul = src.get("judul") if isinstance(src, dict) else src.judul
-        sumber = src.get("sumber") if isinstance(src, dict) else src.sumber
-        url = src.get("url") if isinstance(src, dict) else src.url
-        
-        link = f"[{judul} ({sumber})]({url})"
-        markdown += f"{i}. {link}\n"
-    
-    return markdown
-
-
-# ─── Article Generator (Main) ─────────────────────────────────────────────────
-
-
-def generate_article(topic: str, vector_db_path: str) -> dict[str, object]:
-    """
-    Generate artikel multi-seksi (6 poin) dari topic menggunakan RAG pipeline.
-
-    Menggunakan arsitektur yang sama dengan ask() — ChromaDB + expand_query
-    + reranker — tetapi prompt LLM diarahkan ke penulisan artikel terstruktur
-    bukan Q&A. Cocok untuk kebutuhan institusi yayasan dana yang ingin
-    memahami konflik/masalah secara komprehensif.
-
-    Args:
-        topic: Topik artikel (sama dengan topic dari ChatSession)
-        vector_db_path: Path ke ChromaDB yang sudah di-crawl
-
-    Returns:
-        dict dengan keys:
-        - article: str — Artikel dalam format Markdown (6 seksi ## heading)
-        - sources: list[dict] — Source references (judul, sumber, url)
-                                Akan disimpan terpisah di table ArticleSource
-
-    Raises:
-        VectorDBNotFoundError: Jika ChromaDB tidak ditemukan
-        AIServiceError: Jika LLM atau proses lainnya gagal
-    """
-    logger_ai.info(f"Generating article for topic: {topic[:50]}...")
-
-    try:
-        # 1. Load ChromaDB
-        vectordb = load_vectordb(vector_db_path)
-        retriever = vectordb.as_retriever(search_kwargs={"k": VECTOR_RETRIEVAL_K})
-
-        # 2. Expand query per seksi (reuse fungsi existing)
-        llm = get_llm()
-        query_map = expand_query(topic, llm)
-        logger_ai.info(f"Query expansion selesai: {len(query_map)} seksi")
-
-        # 3. Retrieve per seksi, kumpulkan semua doc unik
-        seen_docs: set = set()
-        all_docs: list = []
-        for section, queries in query_map.items():
-            for query in queries:
-                docs = retriever.invoke(query)
-                for doc in docs:
-                    doc_id = doc.page_content[:100]
-                    if doc_id not in seen_docs:
-                        seen_docs.add(doc_id)
-                        all_docs.append(doc)
-
-        logger_ai.info(f"Total unique docs sebelum reranking: {len(all_docs)}")
-
-        # 4. Rerank
-        reranked_docs = rerank_to_docs(topic, all_docs)
-        logger_ai.info(f"Reranking selesai: {len(reranked_docs)} docs dipilih")
-
-        # 5. Extract sources dari reranked docs
-        sources = _extract_sources(reranked_docs)
-        logger_ai.info(f"Extracted {len(sources)} sources")
-
-        # 6. Gabungkan context
-        context = "\n\n".join([d.page_content for d in reranked_docs])
-
-        # 7. Build article prompt
-        prompt = build_article_prompt(context, topic)
-
-        # 8. Invoke LLM
-        response = llm.invoke(prompt)
-        article = response.content.strip()
-
-        logger_ai.info(f"Article generated ({len(article)} chars, {len(sources)} sources)")
-        return {
-            "article": article,
-            "sources": sources,
-        }
-
-    except (ValidationError, VectorDBNotFoundError, AIServiceError):
-        raise
-    except Exception as e:
-        logger_ai.error(f"Unexpected error in generate_article(): {e}", exc_info=True)
-        raise AIServiceError(f"Gagal generate artikel: {str(e)}")
-
-
-# ─── Main Function (Legacy Q&A) ───────────────────────────────────────────────
-
-def ask(
-    question: str,
-    vector_db_path: str,
-    history: Optional[list] = None,
-) -> str:
-    if history is None:
-        history = []
-
-    logger_ai.info(f"Processing question: {question[:50]}...")
-
-    try:
-        # 1. Load ChromaDB — TIDAK BERUBAH
-        vectordb = load_vectordb(vector_db_path)
-        retriever = vectordb.as_retriever(search_kwargs={"k": VECTOR_RETRIEVAL_K})
-
-        # 2. Expand query → dapat dict per seksi
-        llm = get_llm()
-        query_map = expand_query(question, llm)
-        logger_ai.info(f"Query expansion selesai: {len(query_map)} seksi")
-
-        # 3. Retrieve per seksi, kumpulkan semua doc unik
-        seen_docs = set()
-        all_docs: list = []  # pool flat semua dokumen dari semua seksi
-
-        for section, queries in query_map.items():
-            for query in queries:
-                docs = retriever.invoke(query)
-                for doc in docs:
-                    doc_id = doc.page_content[:100]
-                    if doc_id not in seen_docs:
-                        seen_docs.add(doc_id)
-                        all_docs.append(doc)
-
-        logger_ai.info(f"Total unique docs sebelum reranking: {len(all_docs)}")
-
-        # 4. Rerank — pilih dokumen paling relevan sebelum masuk ke LLM
-        #
-        # Reranker menilai tiap dokumen dengan 3 metode:
-        #   BM25 (keyword match) + Cosine similarity + Cross-encoder (ML model)
-        # Hanya top-N dokumen dengan skor tertinggi yang diteruskan ke prompt.
-        # Ini memastikan LLM mendapat konteks yang benar-benar relevan,
-        # bukan semua dokumen mentah dari ChromaDB.
-        #
-        reranked_docs = rerank_to_docs(question, all_docs)
-        logger_ai.info(f"Reranking selesai: {len(reranked_docs)} docs dipilih")
-
-        # 5. Gabungkan jadi context dari dokumen yang sudah di-rerank
-        context = "\n\n".join([d.page_content for d in reranked_docs])
-
-        # 6. build_prompt
-        prompt = build_prompt(context, history, question)
-
-        # 7. Invoke LLM untuk jawaban final
-        response = llm.invoke(prompt)
-        answer = response.content.strip()
-
-        logger_ai.info(f"Answer generated ({len(answer)} chars)")
-        return answer
-
-    except (ValidationError, VectorDBNotFoundError, AIServiceError):
-        raise
-    except Exception as e:
-        logger_ai.error(f"Unexpected error in ask(): {e}", exc_info=True)
-        raise AIServiceError(f"Gagal generate jawaban: {str(e)}")
+    """Format sources list into APA-style markdown with [link] text."""
+    if not sources: return ""
+    md = "\n\n## Sumber & Referensi\n\n"
+    for s in sources:
+        # APA style: Author/Source. (Year/n.d.). Title. [link](url)
+        md += f"- {s['judul']}. (n.d.). *{s['sumber']}*. [link]({s['url']})\n"
+    return md

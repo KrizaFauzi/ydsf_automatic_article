@@ -1,13 +1,17 @@
 <!-- NAVBAR -->
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>YDSF – Sign Up</title>
-  <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Inter:wght@400;500;600&display=swap"
+    rel="stylesheet" />
   <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 </head>
+
 <body class="page-auth">
 
   {% include 'components/navbar.html' %}
@@ -20,23 +24,23 @@
       <div class="form-row">
         <div class="form-group">
           <label for="firstname">First Name</label>
-          <input type="text" id="firstname" placeholder="John" autocomplete="given-name"/>
+          <input type="text" id="firstname" placeholder="John" autocomplete="given-name" />
         </div>
         <div class="form-group">
           <label for="lastname">Last Name</label>
-          <input type="text" id="lastname" placeholder="Doe" autocomplete="family-name"/>
+          <input type="text" id="lastname" placeholder="Doe" autocomplete="family-name" />
         </div>
       </div>
 
       <div class="form-group">
         <label for="email">Email</label>
-        <input type="email" id="email" placeholder="example@email.com" autocomplete="email"/>
+        <input type="email" id="email" placeholder="example@email.com" autocomplete="email" />
       </div>
 
       <div class="form-group">
         <label for="password">Password</label>
-        <input type="password" id="password" placeholder="Create a password"
-               autocomplete="new-password" oninput="checkStrength(this.value)"/>
+        <input type="password" id="password" placeholder="Create a password" autocomplete="new-password"
+          oninput="checkStrength(this.value)" />
         <div class="strength-bar">
           <span id="s1"></span><span id="s2"></span>
           <span id="s3"></span><span id="s4"></span>
@@ -46,18 +50,19 @@
 
       <div class="form-group">
         <label for="confirm">Confirm Password</label>
-        <input type="password" id="confirm" placeholder="Repeat your password" autocomplete="new-password"/>
+        <input type="password" id="confirm" placeholder="Repeat your password" autocomplete="new-password" />
       </div>
 
       <button class="btn-submit" id="btn-register">Create Account</button>
 
       <p class="card-footer">
-        Already have an account? <a href="login.html">Login</a>
+        Already have an account? <a href="{{ url_for('read_login') }}">Login</a>
       </p>
     </div>
   </main>
 
-<script src="{{ url_for('static', path='js/auth.js') }}"></script>
+  <script src="{{ url_for('static', path='js/auth.js') }}"></script>
 
 </body>
+
 </html>

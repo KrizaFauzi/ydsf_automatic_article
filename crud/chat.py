@@ -9,6 +9,7 @@ Operations:
 - Update chat session status
 """
 
+from typing import Optional
 from sqlmodel import Session, select
 from datetime import datetime, timezone
 
@@ -26,6 +27,7 @@ def create_chat_session(
     title: str,
     topic: str,
     vector_db_path: str,
+    model_choice: Optional[str] = None,
 ) -> ChatSession:
     """
     Create new chat session.
@@ -36,6 +38,7 @@ def create_chat_session(
         title: Chat session title
         topic: Topic yang di-crawl
         vector_db_path: Path ke ChromaDB untuk session ini
+        model_choice: Model LLM yang dipilih
     
     Returns:
         ChatSession yang baru dibuat
@@ -49,6 +52,7 @@ def create_chat_session(
             title=title,
             topic=topic,
             vector_db_path=vector_db_path,
+            model_choice=model_choice,
             is_ready=False,  # Default belum siap sampai crawl selesai
         )
         session.add(chat_session)
@@ -61,7 +65,7 @@ def create_chat_session(
     except Exception as e:
         logger_crud.error(f"Error creating chat session: {e}", exc_info=True)
         session.rollback()
-        raise DatabaseError(f"Gagal create chat session: {str(e)}")
+        raise DatabaseError("Gagal membuat session chat", details={"error": str(e)})
 
 
 def get_chat_session(session: Session, session_id: str) -> ChatSession:
@@ -93,7 +97,7 @@ def get_chat_session(session: Session, session_id: str) -> ChatSession:
         raise
     except Exception as e:
         logger_crud.error(f"Error getting chat session: {e}", exc_info=True)
-        raise DatabaseError(f"Gagal get chat session: {str(e)}")
+        raise DatabaseError("Gagal mengambil session chat", details={"error": str(e)})
 
 
 def get_user_chat_sessions(
@@ -128,7 +132,41 @@ def get_user_chat_sessions(
 
     except Exception as e:
         logger_crud.error(f"Error getting user chat sessions: {e}", exc_info=True)
-        raise DatabaseError(f"Gagal get chat sessions: {str(e)}")
+        raise DatabaseError("Gagal mengambil daftar session chat", details={"error": str(e)})
+
+
+def delete_chat_session(session: Session, session_id: str) -> bool:
+    """
+    Hapus chat session dan semua data terkait (messages, sources).
+    
+    Args:
+        session: Database session
+        session_id: ID session yang akan dihapus
+        
+    Returns:
+        True jika berhasil
+    """
+    try:
+        chat_session = get_chat_session(session, session_id)
+        
+        from sqlalchemy import delete as sa_delete
+        # 1. Hapus messages
+        session.execute(sa_delete(ChatMessage).where(ChatMessage.session_id == session_id))
+        # 2. Hapus sources
+        session.execute(sa_delete(ArticleSource).where(ArticleSource.session_id == session_id))
+        # 3. Hapus session
+        session.delete(chat_session)
+        
+        session.commit()
+        logger_crud.info(f"Chat session deleted from DB: {session_id}")
+        return True
+
+    except NotFoundError:
+        raise
+    except Exception as e:
+        logger_crud.error(f"Error deleting chat session: {e}", exc_info=True)
+        session.rollback()
+        raise DatabaseError("Gagal menghapus session chat", details={"error": str(e)})
 
 
 def update_chat_session_status(
@@ -171,7 +209,7 @@ def update_chat_session_status(
     except Exception as e:
         logger_crud.error(f"Error updating chat session: {e}", exc_info=True)
         session.rollback()
-        raise DatabaseError(f"Gagal update chat session: {str(e)}")
+        raise DatabaseError("Gagal memperbarui status session chat", details={"error": str(e)})
 
 
 def update_session_paths(
@@ -211,7 +249,7 @@ def update_session_paths(
     except Exception as e:
         logger_crud.error(f"Error updating session paths: {e}", exc_info=True)
         session.rollback()
-        raise DatabaseError(f"Gagal update session paths: {str(e)}")
+        raise DatabaseError("Gagal memperbarui path session chat", details={"error": str(e)})
 
 
 def set_session_ready(
@@ -239,7 +277,7 @@ def set_session_ready(
     except Exception as e:
         logger_crud.error(f"Error marking session ready: {e}", exc_info=True)
         session.rollback()
-        raise DatabaseError(f"Gagal mark session ready: {str(e)}")
+        raise DatabaseError("Gagal menandai session sebagai siap", details={"error": str(e)})
 
 
 def set_session_error(
@@ -276,7 +314,29 @@ def set_session_error(
     except Exception as e:
         logger_crud.error(f"Error setting session error: {e}", exc_info=True)
         session.rollback()
-        raise DatabaseError(f"Gagal set session error: {str(e)}")
+        raise DatabaseError("Gagal mencatat error session chat", details={"error": str(e)})
+
+
+def increment_session_progress(
+    session: Session,
+    session_id: str,
+) -> int:
+    """
+    Increment progress_count (anti-timeout heartbeat).
+    """
+    try:
+        chat_session = get_chat_session(session, session_id)
+        chat_session.progress_count += 1
+        chat_session.updated_at = datetime.now(timezone.utc)
+
+        session.add(chat_session)
+        session.commit()
+        session.refresh(chat_session)
+
+        return chat_session.progress_count
+    except Exception as e:
+        logger_crud.error(f"Error incrementing progress: {e}")
+        return 0
 
 
 # ─── ChatMessage CRUD ────────────────────────────────────────────────────────
@@ -322,7 +382,7 @@ def create_chat_message(
     except Exception as e:
         logger_crud.error(f"Error creating chat message: {e}", exc_info=True)
         session.rollback()
-        raise DatabaseError(f"Gagal create chat message: {str(e)}")
+        raise DatabaseError("Gagal membuat pesan chat", details={"error": str(e)})
 
 
 def get_chat_messages(
@@ -357,7 +417,7 @@ def get_chat_messages(
 
     except Exception as e:
         logger_crud.error(f"Error getting chat messages: {e}", exc_info=True)
-        raise DatabaseError(f"Gagal get chat messages: {str(e)}")
+        raise DatabaseError("Gagal mengambil pesan chat", details={"error": str(e)})
 
 
 def get_latest_chat_messages(
@@ -397,7 +457,7 @@ def get_latest_chat_messages(
 
     except Exception as e:
         logger_crud.error(f"Error getting latest chat messages: {e}", exc_info=True)
-        raise DatabaseError(f"Gagal get latest messages: {str(e)}")
+        raise DatabaseError("Gagal mengambil pesan chat terbaru", details={"error": str(e)})
 
 
 def get_session_message_count(session: Session, session_id: str) -> int:
@@ -469,7 +529,7 @@ def create_article_source(
     except Exception as e:
         logger_crud.error(f"Error creating article source: {e}", exc_info=True)
         session.rollback()
-        raise DatabaseError(f"Gagal create article source: {str(e)}")
+        raise DatabaseError("Gagal membuat sumber artikel", details={"error": str(e)})
 
 
 def create_article_sources_batch(
@@ -518,7 +578,7 @@ def create_article_sources_batch(
     except Exception as e:
         logger_crud.error(f"Error creating article sources batch: {e}", exc_info=True)
         session.rollback()
-        raise DatabaseError(f"Gagal create article sources: {str(e)}")
+        raise DatabaseError("Gagal membuat sumber artikel secara batch", details={"error": str(e)})
 
 
 def get_article_sources(
@@ -547,4 +607,4 @@ def get_article_sources(
 
     except Exception as e:
         logger_crud.error(f"Error getting article sources: {e}", exc_info=True)
-        raise DatabaseError(f"Gagal get article sources: {str(e)}")
+        raise DatabaseError("Gagal mengambil sumber artikel", details={"error": str(e)})

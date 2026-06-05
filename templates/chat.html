@@ -1,158 +1,236 @@
 <!DOCTYPE html>
 <html lang="id">
+
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>YDSF – Chat</title>
 
   <!-- Fonts -->
-  <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet" />
 
   <!-- Markdown renderer -->
   <script src="https://cdn.jsdelivr.net/npm/marked@13/marked.min.js"></script>
 
   <!-- Syntax highlighting -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css"/>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css" />
   <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/lib/highlight.min.js"></script>
 
   <!-- Global stylesheet -->
   <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 
   <link rel="stylesheet" href="{{ url_for('static', path='chat.css') }}">
+
+  <!-- PDF Generator -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 </head>
+
 <body class="page-chat">
 
-<!-- ── MODAL: New Chat ── -->
-<div class="modal-overlay" id="newChatModal">
-  <div class="modal-box">
-    <div class="modal-icon">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-      </svg>
-    </div>
-    <h2 class="modal-title">Mulai Artikel Baru</h2>
-    <p class="modal-sub">Masukkan topik yang ingin dibuatkan artikelnya. AI akan mengumpulkan data dari berbagai sumber, lalu otomatis menghasilkan artikel terstruktur untuk yayasan.</p>
-    <label class="modal-label" for="topicInput">Topik / Kata Kunci</label>
-    <input
-      type="text"
-      id="topicInput"
-      class="modal-input"
-      placeholder="Contoh: zakat produktif, AI 2025, …"
-      maxlength="200"
-      onkeydown="handleModalKey(event)"
-    />
-    <div class="crawl-loading" id="crawlLoading">
-      <div class="crawl-ring"></div>
-      <strong>Mengumpulkan & Menghasilkan…</strong>
-      <p>Sedang crawl dari berbagai sumber<br/>& generate artikel terstruktur<br/>Mohon tunggu sekitar 1 - 2 menit</p>
-    </div>
-    <div class="modal-actions" id="modalActions">
-      <button class="btn-cancel" onclick="closeModal()">Batal</button>
-      <button class="btn-start" id="btnStart" onclick="startNewChat()">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <polygon points="5 3 19 12 5 21 5 3"/>
+  <!-- ── MODAL: New Chat ── -->
+  <div class="modal-overlay" id="newChatModal">
+    <div class="modal-box">
+      <div class="modal-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
         </svg>
-        Mulai Buat Artikel
-      </button>
+      </div>
+      <h2 class="modal-title">Mulai Artikel Baru</h2>
+      <p class="modal-sub">Masukkan topik yang ingin dibuatkan artikelnya. AI akan mengumpulkan data dari berbagai
+        sumber, lalu otomatis menghasilkan artikel terstruktur untuk yayasan.</p>
+      <label class="modal-label" for="topicInput">Topik / Kata Kunci</label>
+      <input type="text" id="topicInput" class="modal-input" placeholder="Contoh: zakat produktif, AI 2025, …"
+        maxlength="200" onkeydown="handleModalKey(event)" />
+
+      <!-- Advanced Options Toggle -->
+      <div class="advanced-toggle" onclick="toggleAdvancedOptions()">
+        <span id="advancedToggleText">Opsi Lanjutan</span>
+        <svg id="advancedToggleIcon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transition: transform 0.2s;"><polyline points="6 9 12 15 18 9"></polyline></svg>
+      </div>
+
+      <!-- Advanced Options Content -->
+      <div class="advanced-options" id="advancedOptions">
+        <div class="advanced-grid">
+          <div class="advanced-field">
+            <label class="modal-label" for="lengthInput">Panjang Artikel</label>
+            <select id="lengthInput" class="modal-input">
+              <option value="short">Singkat (~500 kata)</option>
+              <option value="medium" selected>Sedang (~1200 kata)</option>
+              <option value="long">Mendalam (~2500 kata)</option>
+            </select>
+          </div>
+          <div class="advanced-field">
+            <label class="modal-label" for="modelInput">Model LLM</label>
+            <select id="modelInput" class="modal-input">
+              <optgroup label="Meta Llama (Production)">
+                <option value="llama-3.3-70b-versatile" selected>Llama 3.3 70B (Versatile)</option>
+                <option value="llama-3.1-8b-instant">Llama 3.1 8B (Instant)</option>
+              </optgroup>
+              <optgroup label="OpenAI Open-Source (High Capacity)">
+                <option value="openai/gpt-oss-120b">GPT-OSS 120B (Flagsip)</option>
+                <option value="openai/gpt-oss-20b">GPT-OSS 20B (High Throughput)</option>
+              </optgroup>
+              <optgroup label="Groq Systems (Tool-Integrated)">
+                <option value="groq/compound">Groq Compound (Agentic)</option>
+                <option value="groq/compound-mini">Groq Compound Mini</option>
+              </optgroup>
+              <optgroup label="Experimental & Preview">
+                <option value="meta-llama/llama-4-scout-17b-16e-instruct">Llama 4 Scout (Preview)</option>
+                <option value="qwen/qwen3-32b">Qwen 3 32B</option>
+                <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
+              </optgroup>
+            </select>
+          </div>
+        </div>
+        
+        <label class="modal-label" for="infoInput">Informasi Tambahan / Konteks</label>
+        <textarea id="infoInput" class="modal-input" style="height: 60px; resize: none;" placeholder="Sebutkan fakta spesifik atau sudut pandang tertentu..."></textarea>
+        
+        <label class="modal-label" for="pointsInput">Poin Utama (Pisahkan dengan koma)</label>
+        <input type="text" id="pointsInput" class="modal-input" placeholder="Contoh: Dampak ekonomi, Statistik 2024, ..." />
+        
+        <label class="modal-label" for="seoInput">SEO Keywords (Pisahkan dengan koma)</label>
+        <input type="text" id="seoInput" class="modal-input" placeholder="Contoh: filantropi, zakat, ydsf, ..." />
+        
+        <div class="advanced-field" style="grid-column: span 2; display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 10px; background: rgba(16, 185, 129, 0.05); border-radius: 10px; border: 1px dashed var(--primary-light);">
+          <input type="checkbox" id="crawlToggle" checked style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--primary-dark);" />
+          <label class="modal-label" for="crawlToggle" style="margin-bottom: 0; cursor: pointer; color: var(--primary-dark);">Cari data dari internet & media sosial (Crawling)</label>
+        </div>
+      </div>
+
+      <div class="crawl-loading" id="crawlLoading">
+        <div class="crawl-ring"></div>
+        <strong>Mengumpulkan & Menghasilkan…</strong>
+        <p>Sedang crawl dari berbagai sumber<br />& generate artikel terstruktur<br />Mohon tunggu sekitar 3 - 4 menit
+        </p>
+      </div>
+      <div class="modal-actions" id="modalActions">
+        <button class="btn-cancel" onclick="closeModal()">Batal</button>
+        <button class="btn-start" id="btnStart" onclick="startNewChat()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+          Mulai Buat Artikel
+        </button>
+      </div>
     </div>
   </div>
-</div>
 
-<!-- ── Toast Container ── -->
-<div class="toast-container" id="toastContainer"></div>
+  <!-- ── Toast Container ── -->
+  <div class="toast-container" id="toastContainer"></div>
 
-<!-- ── MAIN LAYOUT ── -->
-<div class="chat-wrapper">
-
-  <!-- ── SIDEBAR ── -->
-  <aside class="sidebar" id="sidebar">
-    <div class="sidebar-header">
-      <a href="/" class="sidebar-logo">
-        <img src="/static/Asset/logo.png" alt="YDSF"
-             onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/>
-        <span class="sidebar-logo-placeholder" style="display:none;">YDSF</span>
-      </a>
-    </div>
-
-    <button class="btn-new-chat" id="btnNewChat" onclick="openModal()">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-      </svg>
-      New Chat
-    </button>
-
-    <div class="sidebar-section-label">Sesi Terbaru</div>
-
-    <div class="chat-list" id="chatList">
-      <div class="sidebar-empty">
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-        </svg>
-        <br>Belum ada sesi.<br>Klik <strong style="color:rgba(255,255,255,.6)">New Chat</strong> untuk mulai.
+  <!-- ── MODAL: Delete Confirmation ── -->
+  <div class="modal-overlay" id="deleteConfirmModal">
+    <div class="modal-box" style="max-width: 400px;">
+      <div class="modal-icon" style="background: #fee2e2; color: #dc2626;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+      </div>
+      <h2 class="modal-title">Hapus Sesi?</h2>
+      <p class="modal-sub">Apakah Anda yakin ingin menghapus sesi ini? Tindakan ini akan menghapus artikel dan data riset secara permanen dan tidak dapat dibatalkan.</p>
+      <div class="modal-actions">
+        <button class="btn-cancel" onclick="closeDeleteModal()">Batal</button>
+        <button class="btn-start" style="background: #dc2626;" id="btnConfirmDelete" onclick="confirmDelete()">
+          Hapus Permanen
+        </button>
       </div>
     </div>
-
-    <div class="sidebar-footer">
-      <button class="btn-sidebar-logout" onclick="logout()">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-          <polyline points="16 17 21 12 16 7"/>
-          <line x1="21" y1="12" x2="9" y2="12"/>
-        </svg>
-        Logout
-      </button>
-    </div>
-  </aside>
-
-  <!-- ── MAIN ── -->
-  <div class="chat-main">
-
-    <!-- Topbar -->
-    <div class="chat-topbar">
-      <button class="btn-toggle" onclick="toggleSidebar()" title="Toggle sidebar">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <line x1="3" y1="6" x2="21" y2="6"/>
-          <line x1="3" y1="12" x2="21" y2="12"/>
-          <line x1="3" y1="18" x2="21" y2="18"/>
-        </svg>
-      </button>
-      <span class="chat-topbar-title" id="topbarTitle">YDSF AI Chat</span>
-      <span class="topbar-topic" id="topbarBadge" style="display:none;"></span>
-    </div>
-
-    <!-- Messages Header -->
-    <div class="chat-header hidden" id="chatHeader">
-      <div class="chat-header-content">
-        <h1 class="chat-header-title" id="chatHeaderTitle">YDSF Article Generator</h1>
-        <p class="chat-header-subtitle" id="chatHeaderSubtitle">Buat artikel otomatis dari berbagai sumber data</p>
-      </div>
-    </div>
-
-    <!-- Messages -->
-    <div class="chat-messages" id="chatMessages">
-      <div class="chat-empty" id="emptyState">
-        <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="#1e3326" stroke-width="1.3">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-        </svg>
-        <p>Selamat datang di YDSF Article Generator</p>
-        <span>Buat sesi baru, pilih topik, lalu klik Generate Artikel untuk menghasilkan artikel otomatis.</span>
-      </div>
-    </div>
-
-    <!-- Generate bar (now for regenerate / article controls) -->
-    <div class="generate-bar" id="generateBar">
-      <button class="btn-generate" id="btnGenerate" onclick="generateArticle()" title="Regenerate artikel dari sesi ini">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36M20.49 15a9 9 0 0 1-14.85 3.36"/>
-        </svg>
-        Regenerate Artikel
-      </button>
-      <span class="generate-hint" id="generateHint">Klik untuk buat artikel ulang</span>
-    </div>
-
   </div>
-</div>
 
-<script src="{{ url_for('static', path='js/chat.js') }}"></script>
+  <!-- ── SIDEBAR OVERLAY (Mobile) ── -->
+  <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
+
+  <!-- ── MAIN LAYOUT ── -->
+  <div class="chat-wrapper">
+
+    <!-- ── SIDEBAR ── -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <a href="/" class="sidebar-logo">
+          <img src="/static/Asset/logo.png" alt="YDSF"
+            onerror="this.style.display='none'; this.nextElementSibling.style.display='block';" />
+          <span class="sidebar-logo-placeholder" style="display:none;">YDSF</span>
+        </a>
+      </div>
+
+      <button class="btn-new-chat" id="btnNewChat" onclick="openModal()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"
+          stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+        Generate New Article
+      </button>
+
+      <div class="sidebar-section-label">Sesi Terbaru</div>
+
+      <div class="chat-list" id="chatList">
+        <div class="sidebar-empty">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+            stroke-linecap="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
+          <br>Belum ada sesi.<br>Klik <strong style="color:rgba(255,255,255,.6)">Generate New Article</strong> untuk
+          mulai.
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <button class="btn-sidebar-logout" onclick="logout()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <polyline points="16 17 21 12 16 7" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
+          Logout
+        </button>
+      </div>
+    </aside>
+
+    <!-- ── MAIN ── -->
+    <div class="chat-main">
+
+      <!-- Topbar -->
+      <div class="chat-topbar">
+        <button class="btn-toggle" onclick="toggleSidebar()" title="Toggle sidebar">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round">
+            <line x1="3" y1="6" x2="21" y2="6" />
+            <line x1="3" y1="12" x2="21" y2="12" />
+            <line x1="3" y1="18" x2="21" y2="18" />
+          </svg>
+        </button>
+        <span class="chat-topbar-title" id="topbarTitle">YDSF AI Chat</span>
+      </div>
+
+      <!-- Messages Header -->
+      <div class="chat-header hidden" id="chatHeader">
+        <div class="chat-header-content">
+          <h1 class="chat-header-title" id="chatHeaderTitle">YDSF Article Generator</h1>
+          <p class="chat-header-subtitle" id="chatHeaderSubtitle" style="display:none;"></p>
+        </div>
+      </div>
+
+      <!-- Messages -->
+      <div class="chat-messages" id="chatMessages">
+        <div class="chat-empty" id="emptyState">
+          <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="#1e3326" stroke-width="1.3">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
+          <p>Selamat datang di YDSF Article Generator</p>
+          <span>Buat sesi baru, pilih topik, lalu tunggu artikel otomatis dihasilkan.</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', path='js/chat.js') }}?v=1.0.1"></script>
 </body>
+
 </html>

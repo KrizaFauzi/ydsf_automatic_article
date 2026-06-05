@@ -132,6 +132,11 @@ class ChatSession(SQLModel, table=True):
         max_length=500,
         description="Path ke ChromaDB untuk session ini",
     )
+    model_choice: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Model LLM yang dipilih untuk session ini",
+    )
     is_ready: bool = Field(
         default=False,
         description="Apakah crawl sudah selesai & data siap untuk chat",
@@ -140,6 +145,10 @@ class ChatSession(SQLModel, table=True):
         default="processing",
         max_length=20,
         description="Status: 'processing' | 'ready' | 'error'",
+    )
+    progress_count: int = Field(
+        default=0,
+        description="Counter untuk tracking progress (anti-timeout)",
     )
     error_message: Optional[str] = Field(
         default=None,

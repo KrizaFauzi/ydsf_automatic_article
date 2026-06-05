@@ -25,9 +25,10 @@ from sqlmodel import SQLModel
 from migration.base import engine
 from migration import models  # noqa: F401
 from api.v1 import auth, chat
+from fastapi.exceptions import RequestValidationError
 from core.logger import get_logger
 from core.exceptions import AppException
-from core.responses import error_response
+from core.responses import error_response, ErrorResponse
 
 # ─── Logger ─────────────────────────────────────────────────────────────────
 logger = get_logger("main")
@@ -62,38 +63,47 @@ templates = Jinja2Templates(directory="templates")
 async def app_exception_handler(request: Request, exc: AppException):
     """
     Handle custom AppException dan convert ke HTTP response.
-    
-    Converts:
-    - ValidationError (400)
-    - AuthenticationError (401)
-    - InvalidTokenError (401)
-    - InvalidCredentialsError (401)
-    - NotFoundError (404)
-    - DuplicateError (409)
-    - AIServiceError (500)
-    - CrawlerError (500)
-    - etc.
     """
     logger.warning(f"AppException: {exc.error_code} - {exc.message}")
-    response = error_response(
+    content, _ = error_response(
         error=exc.error_code,
         message=exc.message,
-        status_code=exc.status_code,
         details=exc.details,
     )
-    return JSONResponse(status_code=exc.status_code, content=response[0])
+    return JSONResponse(status_code=exc.status_code, content=content)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Handle Pydantic/FastAPI validation errors dan convert ke format standard.
+    """
+    logger.warning(f"Validation error: {exc.errors()}")
+    
+    # Format details agar lebih mudah dibaca
+    details = {}
+    for error in exc.errors():
+        loc = " -> ".join([str(x) for x in error["loc"]])
+        details[loc] = error["msg"]
+        
+    content, _ = error_response(
+        error="VALIDATION_ERROR",
+        message="Input tidak valid",
+        details=details,
+    )
+    return JSONResponse(status_code=422, content=content)
 
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     """Handle unexpected exceptions"""
     logger.error(f"Unexpected exception: {exc}", exc_info=True)
-    response = error_response(
+    content, _ = error_response(
         error="INTERNAL_SERVER_ERROR",
-        message="Terjadi error yang tidak terduga",
+        message="Terjadi kesalahan internal pada server",
         status_code=500,
     )
-    return JSONResponse(status_code=500, content=response[0])
+    return JSONResponse(status_code=500, content=content)
 
 
 
@@ -143,15 +153,59 @@ app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 # app.include_router(chat.router, prefix="/api/v1/chat", tags=["Chat"])  ← untuk update v2 nanti
 
 
-# ─── Migration ────────────────────────────────────────────────────────────────
+# ─── Migration (Alembic) ───────────────────────────────────────────────────────
+
+
+@app.post("/migrate/upgrade", tags=["Migration"])
+def run_alembic_upgrade():
+    """
+    Run pending Alembic migrations (upgrade to head).
+
+    This is the recommended migration method going forward.
+    Uses Alembic instead of raw SQLModel.create_all().
+    """
+    try:
+        from alembic.config import Config
+        from alembic import command
+
+        alembic_cfg = Config("alembic.ini")
+        command.upgrade(alembic_cfg, "head")
+        logger.info("Alembic upgrade to head completed successfully")
+        return {"status": "success", "message": "Alembic migration upgraded to head"}
+    except Exception as e:
+        logger.error(f"Alembic upgrade failed: {e}", exc_info=True)
+        return {"status": "error", "message": f"Alembic upgrade gagal: {str(e)}"}
+
+
+@app.post("/migrate/downgrade", tags=["Migration"])
+def run_alembic_downgrade(revision: str = "-1"):
+    """
+    Roll back Alembic migration by one step (or to a specific revision).
+
+    Args:
+        revision: Alembic revision to downgrade to (default: -1 = one step back).
+                  Pass "base" to undo all migrations.
+    """
+    try:
+        from alembic.config import Config
+        from alembic import command
+
+        alembic_cfg = Config("alembic.ini")
+        command.downgrade(alembic_cfg, revision)
+        logger.info(f"Alembic downgrade to {revision} completed")
+        return {"status": "success", "message": f"Alembic downgraded to {revision}"}
+    except Exception as e:
+        logger.error(f"Alembic downgrade failed: {e}", exc_info=True)
+        return {"status": "error", "message": f"Alembic downgrade gagal: {str(e)}"}
 
 
 @app.post("/migrate", tags=["Migration"])
 def run_migration():
     """
-    Run database migration - create all tables.
+    [Legacy] Create all tables via SQLModel.create_all().
 
-    Call this endpoint once to initialize database.
+    Prefer POST /migrate/upgrade (Alembic) for new deployments.
+    Call this endpoint once to initialize database if Alembic is not available.
     """
     try:
         logger.info("Starting database migration...")
@@ -194,6 +248,14 @@ def run_alter_migration():
             "error_message",
             "ALTER TABLE chat_sessions ADD COLUMN error_message TEXT DEFAULT NULL",
         ),
+        (
+            "progress_count",
+            "ALTER TABLE chat_sessions ADD COLUMN progress_count INT NOT NULL DEFAULT 0",
+        ),
+        (
+            "model_choice",
+            "ALTER TABLE chat_sessions ADD COLUMN model_choice VARCHAR(100) DEFAULT NULL",
+        ),
     ]
 
     results = []
@@ -218,4 +280,4 @@ def run_alter_migration():
         "status": "success" if all_ok else "partial_error",
         "message": "ALTER TABLE selesai",
         "columns": results,
-    }
+    }

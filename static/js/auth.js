@@ -20,13 +20,32 @@ function getOrCreateAlert(buttonId) {
   return el;
 }
 
-function showError(msg, buttonId) {
+function showError(errorData, buttonId) {
   const el = getOrCreateAlert(buttonId);
   if (!el) return;
+  
+  let msg = 'Terjadi kesalahan';
+  
+  if (typeof errorData === 'string') {
+    msg = errorData;
+  } else if (errorData && typeof errorData === 'object') {
+    msg = errorData.message || errorData.detail || msg;
+    
+    // Jika ada detail validasi (dari Pydantic)
+    if (errorData.details && Object.keys(errorData.details).length > 0) {
+      let detailList = '<ul style="margin: 5px 0 0 20px; padding: 0;">';
+      for (const [key, value] of Object.entries(errorData.details)) {
+        detailList += `<li><strong>${key}</strong>: ${value}</li>`;
+      }
+      detailList += '</ul>';
+      msg += detailList;
+    }
+  }
+
   el.style.background = '#fdecea';
   el.style.color      = '#c0392b';
   el.style.border     = '1px solid #e74c3c';
-  el.textContent      = msg;
+  el.innerHTML        = msg; // Gunakan innerHTML untuk list detail
   el.style.display    = 'block';
 }
 
@@ -91,7 +110,7 @@ document.addEventListener('DOMContentLoaded', () => {
           showSuccess(`Selamat datang! Mengarahkan...`, 'btn-login');
           setTimeout(() => window.location.href = '/chat', 1500);
         } else {
-          showError(data.detail || 'Login gagal', 'btn-login');
+          showError(data, 'btn-login');
         }
 
       } catch (err) {
@@ -138,7 +157,7 @@ document.addEventListener('DOMContentLoaded', () => {
           setTimeout(() => window.location.href = '/login', 1500);
         } else {
           // Gagal → tampilkan pesan error dari API
-          showError(data.detail || 'Registrasi gagal', 'btn-register');
+          showError(data, 'btn-register');
         }
 
       } catch (err) {

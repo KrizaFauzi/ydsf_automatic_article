@@ -1,97 +1,42 @@
-# ============================================================
-# Requirements — Python 3.10.12 Compatible
-# ============================================================
-# Dibuat ulang dari nol untuk menghindari konflik dependency
-# yang terjadi saat migrasi dari Python 3.12.5 → 3.10.12.
-#
-# Cara install:
-#   python -m venv .venv
-#   .venv\Scripts\activate
-#   pip install -r requirements-py310.txt
-# ============================================================
+# ─── FastAPI Core ─────────────────────────────────────────────────────────────
+fastapi
+uvicorn
+python-multipart
+jinja2
 
-# --- Web Framework ---
-fastapi[standard]==0.111.0
-uvicorn[standard]==0.29.0
-# starlette — jangan pin manual, biarkan fastapi yang resolve
-python-multipart==0.0.9
-Jinja2==3.1.4
+# ─── AI & RAG ────────────────────────────────────────────────────────────────
+# Removing exact versions to allow pip to resolve the conflict between 
+# langchain-huggingface and other langchain packages.
+langchain
+langchain-core>=0.3.0
+langchain-community
+langchain-groq
+langchain-huggingface
+langchain-chroma
+langchain-text-splitters
+sentence-transformers
+transformers
+chromadb
+rank-bm25
 
-# --- Auth & Security ---
-bcrypt==4.1.3
-cryptography==42.0.8
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
+# ─── Database ────────────────────────────────────────────────────────────────
+sqlmodel
+SQLAlchemy
+PyMySQL
+cryptography
+alembic
 
-# --- Database ---
-sqlmodel==0.0.19
-SQLAlchemy==2.0.30
-PyMySQL==1.1.1
-alembic==1.13.1
-greenlet==3.0.3
+# ─── Utilities ───────────────────────────────────────────────────────────────
+python-dotenv
+requests
+feedparser
+pydantic
+pydantic-settings
+python-jose[cryptography]
+bcrypt
+numpy<2.0
 
-# --- AI / LLM ---
-groq==0.9.0
-langchain==0.2.16
-langchain-core==0.2.38
-langchain-groq==0.1.9
-langchain-community==0.2.16
-langchain-chroma==0.1.4
-langchain-huggingface==0.0.3
-langchain-text-splitters==0.2.4
-
-# --- Vector DB ---
-# chromadb 0.5.4 dan 0.5.5 di-blocklist oleh langchain-chroma 0.1.4
-chromadb==0.5.3
-
-# --- Embeddings & ML ---
-sentence-transformers==3.0.1
-transformers==4.44.2
-tokenizers==0.19.1
-huggingface-hub==0.24.6
-safetensors==0.4.4
-
-# --- PyTorch (CPU) ---
-# Ganti dengan versi GPU jika butuh CUDA:
-#   torch==2.3.1+cu121 --index-url https://download.pytorch.org/whl/cu121
-torch==2.3.1
-scikit-learn==1.5.1
-numpy==1.26.4
-scipy==1.13.1
-
-# --- Reranking ---
-rank-bm25==0.2.2
-
-# --- Data Crawling ---
-praw==7.7.1
-feedparser==6.0.11
-requests==2.32.3
-httpx==0.27.0
-aiohttp==3.9.5
-
-# --- Pydantic ---
-pydantic==2.8.2
-pydantic-settings==2.4.0
-annotated-types==0.7.0
-
-# --- Utilities ---
-python-dotenv==1.0.1
-PyYAML==6.0.2
-orjson==3.10.6
-tenacity==8.5.0
-tqdm==4.66.5
-joblib==1.4.2
-distro==1.9.0
-packaging==24.1
-regex==2024.7.24
-six==1.16.0
-certifi==2024.7.4
-charset-normalizer==3.3.2
-idna==3.7
-urllib3==2.2.2
-click==8.1.7
-colorama==0.4.6
-rich==13.7.1
-anyio==4.4.0
-sniffio==1.3.1
-typing_extensions==4.12.2
+# ─── Extra ──────────────────────────────────────────────────────────────────
+beautifulsoup4
+tqdm
+orjson

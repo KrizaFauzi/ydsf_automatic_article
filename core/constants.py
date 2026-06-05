@@ -32,7 +32,8 @@ CSV_DATA_DIR = "."  # direktori untuk save CSV
 
 # ─── LLM & Embeddings ─────────────────────────────────────────────────────────
 DEFAULT_LLM_MODEL = "llama-3.3-70b-versatile"
-DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_LLM_MODEL_FAST = "llama-3.1-8b-instant"  # Lebih cepat & murah untuk query expansion
+DEFAULT_EMBED_MODEL = "intfloat/multilingual-e5-large"
 LLM_TEMPERATURE = 0  # deterministik, tidak kreatif
 
 # ─── External APIs ────────────────────────────────────────────────────────────

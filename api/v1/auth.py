@@ -35,7 +35,7 @@ from core.constants import (
     SUCCESS_MSG_LOGOUT,
 )
 from core.responses import success_response, error_response
-from crud.user import create_user, get_user_by_email
+from crud.user import create_user, get_user_by_email, get_user_by_username
 from migration.base import get_session
 from migration import models
 from schemas.user import UserLogin, UserRegister, UserResponse
@@ -50,43 +50,31 @@ def register(
 ):
     """
     Register user baru.
-    
-    Args:
-        payload: UserRegister dengan username, email, password
-        session: Database session
-    
-    Returns:
-        UserResponse dengan user data
-    
-    Raises:
-        ValidationError: Input validation gagal
-        DuplicateError: Email sudah terdaftar
     """
     logger_auth.info(f"Register attempt for email: {payload.email}")
 
-    try:
-        # Check if email already registered
-        existing = get_user_by_email(session, payload.email)
-        if existing:
-            logger_auth.warning(f"Email already registered: {payload.email}")
-            raise DuplicateError(ERROR_MSG_EMAIL_REGISTERED, {"email": payload.email})
+    # Check if email already registered
+    existing = get_user_by_email(session, payload.email)
+    if existing:
+        logger_auth.warning(f"Email already registered: {payload.email}")
+        raise DuplicateError(ERROR_MSG_EMAIL_REGISTERED, {"email": payload.email})
 
-        # Create user
-        user = create_user(
-            session=session,
-            username=payload.username,
-            email=payload.email,
-            password=payload.password,
-        )
+    # Check if username already taken
+    existing_username = get_user_by_username(session, payload.username)
+    if existing_username:
+        logger_auth.warning(f"Username already taken: {payload.username}")
+        raise DuplicateError("Username sudah digunakan", {"username": payload.username})
 
-        logger_auth.info(f"User registered successfully: {payload.email}")
-        return user
+    # Create user
+    user = create_user(
+        session=session,
+        username=payload.username,
+        email=payload.email,
+        password=payload.password,
+    )
 
-    except (ValidationError, DuplicateError):
-        raise
-    except Exception as e:
-        logger_auth.error(f"Register error: {e}", exc_info=True)
-        raise
+    logger_auth.info(f"User registered successfully: {payload.email}")
+    return user
 
 
 @router.post("/login")
@@ -97,52 +85,34 @@ def login(
 ):
     """
     Login dan dapatkan JWT token via HTTPOnly cookie.
-    
-    Args:
-        payload: UserLogin dengan email, password
-        response: FastAPI Response untuk set cookie
-        session: Database session
-    
-    Returns:
-        Success message dengan username
-    
-    Raises:
-        InvalidCredentialsError: Email atau password salah
     """
     logger_auth.info(f"Login attempt for email: {payload.email}")
 
-    try:
-        # Get user by email
-        user = get_user_by_email(session, payload.email)
+    # Get user by email
+    user = get_user_by_email(session, payload.email)
 
-        # Validate user exists & password correct
-        if not user or not verify_password(payload.password, user.hashed_password):
-            logger_auth.warning(f"Invalid login attempt for: {payload.email}")
-            raise InvalidCredentialsError(ERROR_MSG_INVALID_CREDENTIALS)
+    # Validate user exists & password correct
+    if not user or not verify_password(payload.password, user.hashed_password):
+        logger_auth.warning(f"Invalid login attempt for: {payload.email}")
+        raise InvalidCredentialsError(ERROR_MSG_INVALID_CREDENTIALS)
 
-        # Create JWT token
-        token = create_access_token(user.id)
+    # Create JWT token
+    token = create_access_token(user.id)
 
-        # Set HTTPOnly cookie
-        response.set_cookie(
-            key=COOKIE_KEY,
-            value=token,
-            httponly=True,  # Prevent JavaScript access (XSS protection)
-            max_age=COOKIE_MAX_AGE_SECONDS,
-            samesite="lax",  # CSRF protection
-        )
+    # Set HTTPOnly cookie
+    response.set_cookie(
+        key=COOKIE_KEY,
+        value=token,
+        httponly=True,  # Prevent JavaScript access (XSS protection)
+        max_age=COOKIE_MAX_AGE_SECONDS,
+        samesite="lax",  # CSRF protection
+    )
 
-        logger_auth.info(f"User logged in successfully: {payload.email}")
-        return success_response(
-            message=SUCCESS_MSG_LOGIN,
-            data={"username": user.username},
-        )
-
-    except (ValidationError, InvalidCredentialsError):
-        raise
-    except Exception as e:
-        logger_auth.error(f"Login error: {e}", exc_info=True)
-        raise
+    logger_auth.info(f"User logged in successfully: {payload.email}")
+    return success_response(
+        message=SUCCESS_MSG_LOGIN,
+        data={"username": user.username},
+    )
 
 
 @router.post("/logout")

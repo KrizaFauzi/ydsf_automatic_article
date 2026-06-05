@@ -8,7 +8,8 @@ kemudian memproses dan menyimpannya ke vector database (ChromaDB) untuk RAG.
 import os
 import csv
 import shutil
-from typing import Optional
+import asyncio
+from typing import Optional, Callable, Any
 from dotenv import load_dotenv
 
 from langchain_chroma import Chroma
@@ -33,7 +34,7 @@ from sources.social import fetch_twitter
 from sources.knowledge import fetch_wikipedia, fetch_wikidata
 
 # Query expansion sederhana (sinonim + HyDE) — hanya untuk tahap crawling
-from services.ai import expand_query_for_search, get_llm, get_embedding
+from services.ai import expand_query_for_search, get_llm, get_llm_fast, get_embedding
 
 load_dotenv()
 
@@ -278,44 +279,16 @@ def _run_source_multi(
 # ─── Main Orchestrator ──────────────────────────────────────────────────────────
 
 
-def run_crawler(query: str, session_id: str) -> dict:
+async def run_crawler(
+    query: str, 
+    session_id: str, 
+    progress_callback: Optional[Callable[[], Any]] = None,
+    seo_keywords: Optional[list[str]] = None
+) -> dict:
     """
-    Orkestrator utama — kumpulkan data dari semua sumber, bangun ChromaDB.
-
-    Algorithm:
-    1. Validasi input
-    2. Jalankan semua sumber dengan query asli dan query expansion (sinonim + HyDE)
-    3. Gabungkan semua hasil menjadi satu pool
-    4. Simpan ke CSV per kategori
-    5. Rebuild ChromaDB dari semua CSV
-    6. Return metadata hasil crawling
-
-    Catatan desain:
-    - Setiap sumber dijalankan via _run_source() yang mengisolasi error
-    - Jika satu sumber gagal, sumber lain tetap berjalan
-    - Crawler dianggap gagal total hanya jika SEMUA sumber menghasilkan 0 docs
-
-    Args:
-        query: Topik/query artikel yang akan dibuat
-        session_id: Identifier unik sesi (dipakai untuk path ChromaDB)
-
-    Returns:
-        dict metadata hasil crawling:
-        {
-            "status": "success",
-            "query": str,
-            "vector_db_path": str,
-            "sources": {nama_sumber: jumlah_docs},
-            "total_docs": int,
-            "total_chunks": int,
-            "message": str,
-        }
-
-    Raises:
-        ValidationError: Jika query atau session_id kosong
-        CrawlerError: Jika semua sumber gagal atau ChromaDB gagal dibangun
+    Orkestrator utama (Async) — kumpulkan data dari semua sumber, bangun ChromaDB.
+    Mendukung progress_callback untuk anti-timeout heartbeat.
     """
-    # ── Validasi ────────────────────────────────────────────
     if not query or not query.strip():
         raise ValidationError("Query tidak boleh kosong")
     if not session_id or not session_id.strip():
@@ -324,47 +297,47 @@ def run_crawler(query: str, session_id: str) -> dict:
     query = query.strip()
     vector_db_path = os.path.join(VECTOR_DB_PATH, f"session_{session_id}")
 
-    logger_crawler.info(f"=== Crawler start: '{query}' (session: {session_id}) ===")
+    logger_crawler.info(f"=== Async Crawler start: '{query}' (session: {session_id}) ===")
 
-    # ── Query Expansion Sederhana ───────────────────────────
-    #
-    # Perluas query dengan sinonim dan HyDE sebelum fetch ke API.
-    # Tujuan: tangkap dokumen yang memakai kata berbeda untuk konsep sama.
-    #
-    # Contoh untuk query "kecerdasan buatan":
-    #   queries = [
-    #     "kecerdasan buatan",                    ← query asli
-    #     "artificial intelligence",              ← sinonim (bahasa Inggris)
-    #     "AI berkembang pesat di berbagai...",   ← HyDE (kalimat hipotetis)
-    #   ]
-    #
-    # Jika LLM gagal → expand_query_for_search() fallback ke [query] saja.
-    #
+    # 1. Query Expansion (Awaited)
     logger_crawler.info("Query expansion: sinonim + HyDE...")
-    llm = get_llm()
-    search_queries = expand_query_for_search(query, llm)
+    llm_fast = get_llm_fast()
+    search_queries = await expand_query_for_search(query, llm_fast)
+    
+    # ── UPGRADE: SEO-Guided Anchors ──────────────────────────────────
+    # Tambahkan kombinasi [Topic + SEO Keyword] ke list pencarian
+    if seo_keywords:
+        logger_crawler.info(f"Adding SEO anchors: {seo_keywords}")
+        for kw in seo_keywords:
+            anchor = f"{query} {kw}"
+            if anchor not in search_queries:
+                search_queries.append(anchor)
+                
     logger_crawler.info(f"Search queries: {search_queries}")
+    if progress_callback: progress_callback() # Heartbeat 1
 
-    # ── Jalankan semua sumber ───────────────────────────────
-    #
-    # Sumber API eksternal → _run_source_multi() dengan semua search_queries
-    #   GDELT, NewsAPI, Google Scrape, Twitter, Wikipedia, Wikidata
-    #
-    # Sumber filter lokal → _run_source() cukup 1x dengan query asli
-    #   RSS dan Google News RSS sudah memuat seluruh feed lalu filter di lokal,
-    #   jadi tidak ada manfaat mengirim ulang query yang berbeda.
-    #
+    # 2. Sequential Category Execution with Heartbeats
+    # News Category
     news_gdelt     = _run_source_multi("GDELT",       fetch_gdelt,       search_queries)
     news_newsapi   = _run_source_multi("NewsAPI",      fetch_newsapi,     search_queries)
-    news_rss       = _run_source("RSS",                fetch_rss,         query)   # filter lokal, 1x cukup
-    news_google    = _run_source("Google News",        fetch_google_news, query)   # filter lokal, 1x cukup
+    news_rss       = _run_source("RSS",                fetch_rss,         query)
+    news_google    = _run_source("Google News",        fetch_google_news, query)
+    if progress_callback: progress_callback() # Heartbeat 2
+
+    # Scrape Category
     scrape_google  = _run_source_multi("Google",       fetch_google,      search_queries)
+    if progress_callback: progress_callback() # Heartbeat 3
+
+    # Social Category
     social_twitter = _run_source_multi("Twitter/X",    fetch_twitter,     search_queries)
+    if progress_callback: progress_callback() # Heartbeat 4
+
+    # Knowledge Category
     know_wikipedia = _run_source_multi("Wikipedia",    fetch_wikipedia,   search_queries)
     know_wikidata  = _run_source_multi("Wikidata",     fetch_wikidata,    search_queries)
+    if progress_callback: progress_callback() # Heartbeat 5
 
-
-    # ── Catat jumlah per sumber (untuk metadata return) ────
+    # 3. Sum & Validate
     sources_count = {
         "gdelt":        len(news_gdelt),
         "newsapi":      len(news_newsapi),
@@ -376,31 +349,18 @@ def run_crawler(query: str, session_id: str) -> dict:
         "wikidata":     len(know_wikidata),
     }
 
-    # ── Cek apakah ada data sama sekali ────────────────────
     total_docs = sum(sources_count.values())
     if total_docs == 0:
-        raise CrawlerError(
-            "Semua sumber gagal menghasilkan data",
-            {"query": query, "sources": sources_count},
-        )
+        raise CrawlerError("Semua sumber gagal menghasilkan data")
 
-    logger_crawler.info(f"Total docs terkumpul: {total_docs}")
-
-    # ── Simpan ke CSV per kategori ──────────────────────────
-    #
-    # Kenapa dipisah per kategori, bukan satu CSV?
-    # Agar ChromaDB bisa di-load ulang per kategori jika perlu,
-    # dan debugging lebih mudah (cek data1.csv = news, dst)
-    #
+    # 4. Save CSVs
     try:
-        # Gabungkan per kategori sebelum disimpan
         news_all    = news_gdelt + news_newsapi + news_rss + news_google
         scrape_all  = scrape_google
         social_all  = social_twitter
         know_all    = know_wikipedia + know_wikidata
 
         saved_files = []
-
         csv_map = {
             "news.csv":      news_all,
             "scrape.csv":    scrape_all,
@@ -409,32 +369,27 @@ def run_crawler(query: str, session_id: str) -> dict:
         }
 
         for filename, data in csv_map.items():
-            filepath = os.path.join(CSV_DATA_DIR, filename)
             if save_csv(data, filename):
-                saved_files.append(filepath)
+                saved_files.append(os.path.join(CSV_DATA_DIR, filename))
 
         if not saved_files:
             raise CrawlerError("Tidak ada CSV yang berhasil disimpan")
 
-    except CrawlerError:
-        raise
+        if progress_callback: progress_callback() # Heartbeat 6
     except Exception as e:
-        logger_crawler.error(f"Error saving CSVs: {e}", exc_info=True)
+        logger_crawler.error(f"Error saving CSVs: {e}")
         raise CrawlerError(f"Gagal menyimpan CSV: {str(e)}")
 
-    # ── Rebuild ChromaDB ────────────────────────────────────
+    # 5. Rebuild ChromaDB
     total_chunks = rebuild_vectordb(saved_files, vector_db_path)
+    if progress_callback: progress_callback() # Heartbeat 7 (Final)
 
-    # ── Return metadata ─────────────────────────────────────
-    result = {
+    return {
         "status": "success",
         "query": query,
         "vector_db_path": vector_db_path,
         "sources": sources_count,
         "total_docs": total_docs,
         "total_chunks": total_chunks,
-        "message": f"Crawling selesai: {total_docs} docs dari {len(saved_files)} kategori",
+        "message": f"Crawling selesai: {total_docs} docs",
     }
-
-    logger_crawler.info(f"=== Crawler selesai: {total_docs} docs, {total_chunks} chunks ===")
-    return result
